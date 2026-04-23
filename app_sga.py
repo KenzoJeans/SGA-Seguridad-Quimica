@@ -4,10 +4,10 @@ import io
 import requests
 import streamlit as st
 import pandas as pd
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
 
 # ─────────────────────────────────────────────
-# CONFIGURACIÓN DE PÁGINA
+# Configuración de página
 # ─────────────────────────────────────────────
 st.set_page_config(
     page_title="SGA – Kenzo Jeans",
@@ -16,9 +16,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─────────────────────────────────────────────
-# ESTILOS LIGEROS
-# ─────────────────────────────────────────────
+# Estilos ligeros
 st.markdown(
     """
 <style>
@@ -32,7 +30,7 @@ st.markdown(
 )
 
 # ─────────────────────────────────────────────
-# COLUMNAS ESPERADAS
+# Columnas esperadas (tal como aparecen en tu Sheet)
 # ─────────────────────────────────────────────
 COL_SUSTANCIA = "SUSTANCIA/QUÍMICO"
 COL_FAMILIA   = "FAMILIA"
@@ -44,7 +42,7 @@ COL_PICTO     = "PICTOGRAMA"
 EXPECTED_HEADERS = [COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_URL, COL_PICTO]
 
 # ─────────────────────────────────────────────
-# UTILIDADES PARA GOOGLE SHEETS
+# Utilidades Google Sheets
 # ─────────────────────────────────────────────
 def parse_sheet_url(url: str) -> Tuple[Optional[str], str]:
     if not url or not isinstance(url, str):
@@ -58,7 +56,7 @@ def parse_sheet_url(url: str) -> Tuple[Optional[str], str]:
     gid = m_gid.group(1) if m_gid else "0"
     return sheet_id, gid
 
-def build_csv_urls(sheet_id: str, gid: str = "0") -> List[str]:
+def build_csv_urls(sheet_id: str, gid: str = "0"):
     urls = []
     if not sheet_id:
         return urls
@@ -87,22 +85,30 @@ def try_download_csv(urls, timeout=15):
     return None, last_err
 
 # ─────────────────────────────────────────────
-# DETECCIÓN DE ENCABEZADO
+# Detección robusta de fila de encabezado
 # ─────────────────────────────────────────────
-def find_header_row(df: pd.DataFrame, expected_tokens=EXPECTED_HEADERS, search_rows: int = 30) -> Optional[int]:
+def find_header_row(df: pd.DataFrame, expected_tokens=EXPECTED_HEADERS, search_rows: int = 20) -> Optional[int]:
+    """
+    Busca la fila que contiene los encabezados reales. Recorre las primeras `search_rows`
+    filas y devuelve el índice de la fila que contiene la mayoría de tokens esperados.
+    """
+    # Normalizar a strings
     df_str = df.fillna("").astype(str)
-    expected_lower = [t.lower() for t in expected_tokens]
     max_rows = min(search_rows, len(df_str))
+    expected_lower = [t.lower() for t in expected_tokens]
     for i in range(max_rows):
         row = df_str.iloc[i].astype(str).str.lower().tolist()
+        # contar cuántos tokens esperados aparecen en esa fila
         count = 0
         for token in expected_lower:
             for cell in row:
                 if token in cell:
                     count += 1
                     break
+        # si encontramos al menos 2 tokens (SUSTANCIA y FAMILIA) o la mayoría, lo consideramos header
         if count >= 2:
             return i
+    # fallback: buscar fila que contenga exactamente "SUSTANCIA" o "SUSTANCIA/QUÍMICO"
     for i in range(max_rows):
         row = df_str.iloc[i].astype(str).str.lower().tolist()
         if any("sustancia" in c or "químico" in c or "quimico" in c for c in row):
@@ -110,22 +116,32 @@ def find_header_row(df: pd.DataFrame, expected_tokens=EXPECTED_HEADERS, search_r
     return None
 
 def read_with_detected_header_from_csv_text(csv_text: str) -> pd.DataFrame:
+    """
+    Lee CSV como header=None, detecta la fila de encabezado y devuelve DataFrame con columnas correctas.
+    """
     raw = pd.read_csv(io.StringIO(csv_text), header=None, dtype=str)
     header_idx = find_header_row(raw, EXPECTED_HEADERS, search_rows=30)
     if header_idx is not None:
+        # construir header a partir de esa fila y tomar los datos siguientes
         header = raw.iloc[header_idx].astype(str).tolist()
         df = raw.iloc[header_idx + 1 :].copy().reset_index(drop=True)
         df.columns = [str(h).strip() if str(h).strip() != "" else f"col_{i}" for i, h in enumerate(header)]
     else:
+        # si no se detecta header, intentar leer con header=0 (por si el CSV ya está bien)
         try:
             df = pd.read_csv(io.StringIO(csv_text), header=0, dtype=str)
         except Exception:
+            # fallback: usar raw y aplanar
             df = raw.copy()
             df.columns = [f"col_{i}" for i in range(df.shape[1])]
     df = ensure_expected_columns(df)
     return df
 
 def read_excel_with_detected_header(uploaded_file) -> pd.DataFrame:
+    """
+    Lee XLSX/XLS intentando detectar la fila de encabezado.
+    """
+    # leer sin header para inspeccionar las primeras filas
     raw = pd.read_excel(uploaded_file, header=None, engine="openpyxl")
     header_idx = find_header_row(raw, EXPECTED_HEADERS, search_rows=30)
     if header_idx is not None:
@@ -133,59 +149,22 @@ def read_excel_with_detected_header(uploaded_file) -> pd.DataFrame:
         df = raw.iloc[header_idx + 1 :].copy().reset_index(drop=True)
         df.columns = [str(h).strip() if str(h).strip() != "" else f"col_{i}" for i, h in enumerate(header)]
     else:
+        # intentar leer con header=0 (caso en que la primera fila ya es header)
         uploaded_file.seek(0)
         try:
             df = pd.read_excel(uploaded_file, header=0, engine="openpyxl")
         except Exception:
+            # fallback: usar raw y renombrar columnas genéricas
             df = raw.copy()
             df.columns = [f"col_{i}" for i in range(df.shape[1])]
     df = ensure_expected_columns(df)
     return df
 
 # ─────────────────────────────────────────────
-# NORMALIZACIÓN DE VIGENCIA (mejora clave)
-# ─────────────────────────────────────────────
-def normalize_vigencia(value) -> str:
-    """
-    Normaliza distintos formatos de vigencia a:
-      - "VIGENTE"
-      - "NO VIGENTE"
-      - "" (sin dato)
-    Detecta variantes como 'VIGENTE', 'VIGENT', 'NO VIGENTE', 'NO-VIGENTE', 'N/A', 'SIN DATO', etc.
-    """
-    if pd.isna(value):
-        return ""
-    s = str(value).strip().upper()
-    if s in ("", "N/A", "NA", "SIN DATO", "SIN_DATO", "ND"):
-        return ""
-    # eliminar caracteres no alfabéticos salvo espacios
-    s_clean = re.sub(r"[^A-ZÑÁÉÍÓÚ\s\-_/]", "", s)
-    # normalizar guiones y barras a espacios
-    s_clean = re.sub(r"[-_/]+", " ", s_clean).strip()
-    # si contiene 'NO' y 'VIGENT' -> NO VIGENTE
-    if "NO" in s_clean and ("VIGENT" in s_clean or "VIGEN" in s_clean or "VIGENCIA" in s_clean):
-        return "NO VIGENTE"
-    # si contiene 'VIGENT' o 'VIGEN' -> VIGENTE
-    if "VIGENT" in s_clean or "VIGEN" in s_clean or s_clean == "VIGENTE":
-        return "VIGENTE"
-    # si contiene 'NO' and not VIGENT but explicit 'NO VIGENTE' variants handled above
-    if s_clean.startswith("NO "):
-        return "NO VIGENTE"
-    # fallback: if string length small and equals 'SI' or 'S' treat as VIGENTE
-    if s_clean in ("SI", "S", "YES"):
-        return "VIGENTE"
-    # fallback: if contains 'VIG' anywhere treat as VIGENTE
-    if "VIG" in s_clean:
-        if "NO" in s_clean:
-            return "NO VIGENTE"
-        return "VIGENTE"
-    # otherwise devolver cadena vacía (sin dato)
-    return ""
-
-# ─────────────────────────────────────────────
-# NORMALIZACIÓN FINAL DE COLUMNAS
+# Normalización final de columnas y valores
 # ─────────────────────────────────────────────
 def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # mapear variantes de nombres a los esperados
     cols_map = {}
     for c in df.columns:
         cl = str(c).strip().lower()
@@ -204,10 +183,12 @@ def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
     if cols_map:
         df = df.rename(columns=cols_map)
 
+    # añadir columnas faltantes
     for col in EXPECTED_HEADERS:
         if col not in df.columns:
             df[col] = pd.NA
 
+    # limpiar y formatear
     df[COL_SUSTANCIA] = df[COL_SUSTANCIA].fillna("").astype(str).str.strip()
     df[COL_FAMILIA] = df[COL_FAMILIA].fillna("").astype(str).str.strip().replace("", "SIN FAMILIA")
     # FECHA: intentar convertir seriales Excel a dd/mm/YYYY
@@ -234,25 +215,25 @@ def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
         return s
 
     df[COL_FECHA] = df[COL_FECHA].apply(fmt_fecha)
-    # Aquí aplicamos la normalización robusta de VIGENCIA
-    df[COL_VIGENCIA] = df[COL_VIGENCIA].apply(normalize_vigencia)
+    df[COL_VIGENCIA] = df[COL_VIGENCIA].fillna("").astype(str).str.strip().str.upper()
     df[COL_URL] = df[COL_URL].fillna("").astype(str).str.strip()
     df[COL_PICTO] = df[COL_PICTO].fillna("").astype(str).str.strip()
     df[COL_FAMILIA] = df[COL_FAMILIA].fillna("SIN FAMILIA").astype(str).str.strip().str.upper()
     return df
 
 # ─────────────────────────────────────────────
-# LECTURA ROBUSTA DE FUENTE (Google Sheet o archivo subido)
+# Cargar datos (prioriza archivo subido, si no intenta Google Sheet)
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=600, show_spinner="Cargando fichas de seguridad…")
 def cargar_datos(sheet_input: Optional[str] = None, uploaded_file=None) -> pd.DataFrame:
     # 1) archivo subido
     if uploaded_file is not None:
-        filename = getattr(uploaded_file, "name", "").lower()
-        if filename.endswith((".xls", ".xlsx")):
+        name = getattr(uploaded_file, "name", "").lower()
+        if name.endswith((".xls", ".xlsx")):
             uploaded_file.seek(0)
             return read_excel_with_detected_header(uploaded_file)
         else:
+            # CSV subido
             uploaded_file.seek(0)
             try:
                 text = uploaded_file.getvalue().decode("utf-8")
@@ -261,7 +242,7 @@ def cargar_datos(sheet_input: Optional[str] = None, uploaded_file=None) -> pd.Da
                 text = uploaded_file.getvalue().decode("latin-1")
             return read_with_detected_header_from_csv_text(text)
 
-    # 2) Google Sheet
+    # 2) intentar Google Sheet
     if sheet_input:
         sheet_id, gid = parse_sheet_url(sheet_input)
         if not sheet_id:
@@ -277,7 +258,7 @@ def cargar_datos(sheet_input: Optional[str] = None, uploaded_file=None) -> pd.Da
     raise ValueError("No se proporcionó archivo ni URL/ID del Google Sheet.")
 
 # ─────────────────────────────────────────────
-# INTERFAZ: entrada y subida
+# Interfaz
 # ─────────────────────────────────────────────
 st.title("Repositorio Hojas de Seguridad — SGA")
 st.caption("Sistema Globalmente Armonizado · Kenzo Jeans · Consulta rápida de fichas de seguridad químicas")
@@ -297,10 +278,10 @@ with st.sidebar:
             st.cache_data.clear()
         except Exception:
             pass
-        st.rerun()
+        st.experimental_rerun()
 
 # ─────────────────────────────────────────────
-# CARGAR DATOS
+# Cargar y manejar errores
 # ─────────────────────────────────────────────
 try:
     df = cargar_datos(sheet_input if sheet_input else None, uploaded_file)
@@ -315,7 +296,7 @@ except Exception as e:
     st.stop()
 
 # ─────────────────────────────────────────────
-# SIDEBAR: filtros y métricas (usar columna ya normalizada)
+# Sidebar: filtros y métricas
 # ─────────────────────────────────────────────
 with st.sidebar:
     st.header("🔎 Filtros")
@@ -325,7 +306,6 @@ with st.sidebar:
     estado_sel = st.radio("Estado de vigencia", options=["Todos", "✅ Vigentes", "⚠️ No vigentes"], index=0)
     st.divider()
     total = len(df)
-    # ahora contamos usando la columna normalizada
     vigentes = (df[COL_VIGENCIA] == "VIGENTE").sum()
     novigentes = total - vigentes
     st.markdown(f"**📦 Total fichas:** {total}")
@@ -333,23 +313,20 @@ with st.sidebar:
     st.markdown(f"**⚠️ No vigentes:** {novigentes}")
 
 # ─────────────────────────────────────────────
-# APLICAR FILTROS
+# Aplicar filtros
 # ─────────────────────────────────────────────
 df_filtrado = df.copy()
-
 if busqueda and busqueda.strip():
     df_filtrado = df_filtrado[df_filtrado[COL_SUSTANCIA].astype(str).str.contains(busqueda.strip(), case=False, na=False)]
-
 if familias_sel:
     df_filtrado = df_filtrado[df_filtrado[COL_FAMILIA].isin(familias_sel)]
-
 if estado_sel == "✅ Vigentes":
     df_filtrado = df_filtrado[df_filtrado[COL_VIGENCIA] == "VIGENTE"]
 elif estado_sel == "⚠️ No vigentes":
     df_filtrado = df_filtrado[df_filtrado[COL_VIGENCIA] != "VIGENTE"]
 
 # ─────────────────────────────────────────────
-# RESULTADOS: mostrar Nombre como título y detalles debajo
+# Resultados: mostrar Nombre como título y detalles debajo
 # ─────────────────────────────────────────────
 n = len(df_filtrado)
 if n == 0:
