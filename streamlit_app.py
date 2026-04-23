@@ -4,10 +4,6 @@ import pandas as pd
 
 st.set_page_config(page_title="SGA - Kenzo Jeans", page_icon="🛡️", layout="wide")
 
-# ... (el resto del código sigue igual)
-
-st.set_page_config(page_title="SGA - Kenzo Jeans", page_icon="🛡️", layout="wide")
-
 st.title("🛡️ Repositorio Hojas de Seguridad (SGA)")
 st.markdown("Consulta rápida de documentos para la planta y PTAR.")
 
