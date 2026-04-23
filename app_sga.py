@@ -78,7 +78,7 @@ st.divider()
 #     Ejemplo: https://docs.google.com/spreadsheets/d/ ►ESTE_ID◄ /edit
 #     El Sheet debe estar compartido como "Cualquier persona con el enlace → Lector"
 # ──────────────────────────────────────────────────────────────────
-SHEET_ID  = "1XwmNLHeeoD3UW41LvfltLA1m4ZexweNi"   # ← pon aquí tu ID
+SHEET_ID  = "1I06rgXcy1ACk50ApIGDVne8UbLFLClRe5wkWKT5KGAQ/edit?usp=sharing"   # ← pon aquí tu ID
 SHEET_GID = "0"                                     # pestaña 0 = primera hoja
 
 # URL de exportación CSV directa — no necesita credenciales
