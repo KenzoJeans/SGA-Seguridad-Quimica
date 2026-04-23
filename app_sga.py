@@ -10,7 +10,7 @@ from typing import Optional, Tuple, List
 # CONFIGURACIÓN DE PÁGINA
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="⚗️📄 Repositorio Hojas de Seguridad (SGA) – Kenzo Jeans",
+    page_title="📄Repositorio Hojas de Seguridad (SGA) – Kenzo Jeans",
     page_icon="⚗️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -403,4 +403,4 @@ for _, row in df_filtrado.iterrows():
     st.markdown("<hr style='margin:6px 0; border-color:#eceff1'>", unsafe_allow_html=True)
 
 st.divider()
-st.caption("🛡️ Kenzo Jeans – Gestión SGA · Los documentos se actualizan desde Google Sheets")
+st.caption("⚗️ Kenzo Jeans – Gestión SGA · Los documentos se actualizan desde Google Sheets")
