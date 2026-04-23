@@ -44,7 +44,7 @@ COL_PICTO     = "PICTOGRAMA"
 EXPECTED_HEADERS = [COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_URL, COL_PICTO]
 
 # ─────────────────────────────────────────────
-# UTILIDADES PARA GOOGLE SHEETS
+# UTILIDADES: Google Sheets, Drive y descarga CSV
 # ─────────────────────────────────────────────
 def parse_sheet_url(url: str) -> Tuple[Optional[str], str]:
     if not url or not isinstance(url, str):
@@ -87,7 +87,7 @@ def try_download_csv(urls, timeout=15):
     return None, last_err
 
 # ─────────────────────────────────────────────
-# DETECCIÓN DE ENCABEZADO
+# DETECCIÓN DE ENCABEZADO ROBUSTA
 # ─────────────────────────────────────────────
 def find_header_row(df: pd.DataFrame, expected_tokens=EXPECTED_HEADERS, search_rows: int = 30) -> Optional[int]:
     df_str = df.fillna("").astype(str)
@@ -143,47 +143,32 @@ def read_excel_with_detected_header(uploaded_file) -> pd.DataFrame:
     return df
 
 # ─────────────────────────────────────────────
-# NORMALIZACIÓN DE VIGENCIA (mejora clave)
+# NORMALIZACIÓN DE VIGENCIA
 # ─────────────────────────────────────────────
 def normalize_vigencia(value) -> str:
-    """
-    Normaliza distintos formatos de vigencia a:
-      - "VIGENTE"
-      - "NO VIGENTE"
-      - "" (sin dato)
-    Detecta variantes como 'VIGENTE', 'VIGENT', 'NO VIGENTE', 'NO-VIGENTE', 'N/A', 'SIN DATO', etc.
-    """
     if pd.isna(value):
         return ""
     s = str(value).strip().upper()
     if s in ("", "N/A", "NA", "SIN DATO", "SIN_DATO", "ND"):
         return ""
-    # eliminar caracteres no alfabéticos salvo espacios
-    s_clean = re.sub(r"[^A-ZÑÁÉÍÓÚ\s\-_/]", "", s)
-    # normalizar guiones y barras a espacios
+    s_clean = re.sub(r"[^A-ZÑÁÉÍÓÚ0-9\s\-_/]", "", s)
     s_clean = re.sub(r"[-_/]+", " ", s_clean).strip()
-    # si contiene 'NO' y 'VIGENT' -> NO VIGENTE
-    if "NO" in s_clean and ("VIGENT" in s_clean or "VIGEN" in s_clean or "VIGENCIA" in s_clean):
+    if "NO" in s_clean and ("VIGENT" in s_clean or "VIGEN" in s_clean or "VIGENCIA" in s_clean or "VIGENTE" in s_clean):
         return "NO VIGENTE"
-    # si contiene 'VIGENT' o 'VIGEN' -> VIGENTE
-    if "VIGENT" in s_clean or "VIGEN" in s_clean or s_clean == "VIGENTE":
+    if "VIGENT" in s_clean or "VIGEN" in s_clean or "VIGENTE" in s_clean:
         return "VIGENTE"
-    # si contiene 'NO' and not VIGENT but explicit 'NO VIGENTE' variants handled above
     if s_clean.startswith("NO "):
         return "NO VIGENTE"
-    # fallback: if string length small and equals 'SI' or 'S' treat as VIGENTE
     if s_clean in ("SI", "S", "YES"):
         return "VIGENTE"
-    # fallback: if contains 'VIG' anywhere treat as VIGENTE
     if "VIG" in s_clean:
         if "NO" in s_clean:
             return "NO VIGENTE"
         return "VIGENTE"
-    # otherwise devolver cadena vacía (sin dato)
     return ""
 
 # ─────────────────────────────────────────────
-# NORMALIZACIÓN FINAL DE COLUMNAS
+# NORMALIZACIÓN DE COLUMNAS Y FECHAS
 # ─────────────────────────────────────────────
 def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
     cols_map = {}
@@ -210,7 +195,7 @@ def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     df[COL_SUSTANCIA] = df[COL_SUSTANCIA].fillna("").astype(str).str.strip()
     df[COL_FAMILIA] = df[COL_FAMILIA].fillna("").astype(str).str.strip().replace("", "SIN FAMILIA")
-    # FECHA: intentar convertir seriales Excel a dd/mm/YYYY
+
     def fmt_fecha(v):
         if pd.isna(v):
             return ""
@@ -234,12 +219,40 @@ def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
         return s
 
     df[COL_FECHA] = df[COL_FECHA].apply(fmt_fecha)
-    # Aquí aplicamos la normalización robusta de VIGENCIA
     df[COL_VIGENCIA] = df[COL_VIGENCIA].apply(normalize_vigencia)
     df[COL_URL] = df[COL_URL].fillna("").astype(str).str.strip()
     df[COL_PICTO] = df[COL_PICTO].fillna("").astype(str).str.strip()
+    df[COL_FAMILIA] = df[COL_FAMILIA].fillna("SIN FAMILIA").astype(str).str_strip = False  # placeholder to avoid lint
+    # Re-apply correct family normalization
     df[COL_FAMILIA] = df[COL_FAMILIA].fillna("SIN FAMILIA").astype(str).str.strip().str.upper()
     return df
+
+# ─────────────────────────────────────────────
+# NORMALIZAR ENLACES DE GOOGLE DRIVE (para mostrar imágenes)
+# ─────────────────────────────────────────────
+def normalize_drive_url(url: str) -> str:
+    if not isinstance(url, str):
+        return ""
+    u = url.strip()
+    if u == "":
+        return ""
+    # drive file link: /d/FILE_ID/
+    m = re.search(r"/d/([a-zA-Z0-9_-]+)", u)
+    if m:
+        file_id = m.group(1)
+        return f"https://drive.google.com/uc?export=view&id={file_id}"
+    # open?id=FILE_ID
+    m2 = re.search(r"open\?id=([a-zA-Z0-9_-]+)", u)
+    if m2:
+        file_id = m2.group(1)
+        return f"https://drive.google.com/uc?export=view&id={file_id}"
+    # share link with id= in query
+    m3 = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", u)
+    if m3:
+        file_id = m3.group(1)
+        return f"https://drive.google.com/uc?export=view&id={file_id}"
+    # otherwise return original
+    return u
 
 # ─────────────────────────────────────────────
 # LECTURA ROBUSTA DE FUENTE (Google Sheet o archivo subido)
@@ -308,14 +321,25 @@ except Exception as e:
     st.error(
         "❌ No se pudo leer la fuente de datos. Verifica:\n"
         "1) La URL/ID es correcta.\n"
-        "2) El Sheet está compartido como 'Cualquier persona con el enlace → Lector' (si usas Google Sheets).\n"
+        "2) El Sheet esté compartido como 'Cualquier persona con el enlace → Lector'.\n"
         "3) Si subes un archivo, que sea XLSX/CSV válido."
     )
     st.exception(e)
     st.stop()
 
 # ─────────────────────────────────────────────
-# SIDEBAR: filtros y métricas (usar columna ya normalizada)
+# Normalizar pictograma Drive y columnas finales
+# ─────────────────────────────────────────────
+df.columns = [c.strip() for c in df.columns]
+for col in EXPECTED_HEADERS:
+    if col not in df.columns:
+        df[col] = pd.NA
+
+df[COL_PICTO] = df[COL_PICTO].fillna("").astype(str).apply(normalize_drive_url)
+df = ensure_expected_columns(df)
+
+# ─────────────────────────────────────────────
+# SIDEBAR: filtros y métricas
 # ─────────────────────────────────────────────
 with st.sidebar:
     st.header("🔎 Filtros")
@@ -325,7 +349,6 @@ with st.sidebar:
     estado_sel = st.radio("Estado de vigencia", options=["Todos", "✅ Vigentes", "⚠️ No vigentes"], index=0)
     st.divider()
     total = len(df)
-    # ahora contamos usando la columna normalizada
     vigentes = (df[COL_VIGENCIA] == "VIGENTE").sum()
     novigentes = total - vigentes
     st.markdown(f"**📦 Total fichas:** {total}")
@@ -336,13 +359,10 @@ with st.sidebar:
 # APLICAR FILTROS
 # ─────────────────────────────────────────────
 df_filtrado = df.copy()
-
 if busqueda and busqueda.strip():
     df_filtrado = df_filtrado[df_filtrado[COL_SUSTANCIA].astype(str).str.contains(busqueda.strip(), case=False, na=False)]
-
 if familias_sel:
     df_filtrado = df_filtrado[df_filtrado[COL_FAMILIA].isin(familias_sel)]
-
 if estado_sel == "✅ Vigentes":
     df_filtrado = df_filtrado[df_filtrado[COL_VIGENCIA] == "VIGENTE"]
 elif estado_sel == "⚠️ No vigentes":
@@ -379,11 +399,18 @@ for _, row in df_filtrado.iterrows():
 
         st.write("")
 
+        # Mostrar pictograma (soporta enlaces directos y enlaces de Drive transformados)
         if url_picto and url_picto.lower().startswith("http"):
             try:
                 st.image(url_picto, caption="Pictograma SGA", width=120)
             except Exception:
-                st.write("Pictograma no disponible")
+                # fallback: intentar descargar y mostrar desde bytes
+                try:
+                    resp = requests.get(url_picto, timeout=8)
+                    resp.raise_for_status()
+                    st.image(resp.content, caption="Pictograma SGA", width=120)
+                except Exception:
+                    st.write("⚗️ Pictograma no disponible")
         else:
             st.markdown(
                 "<div style='width:90px;height:90px;border:3px solid #e53935;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:2.2em;background:#fff3e0;'>⚗️</div>",
@@ -403,4 +430,4 @@ for _, row in df_filtrado.iterrows():
     st.markdown("<hr style='margin:6px 0; border-color:#eceff1'>", unsafe_allow_html=True)
 
 st.divider()
-st.caption("⚗️ Kenzo Jeans – Gestión SGA · Los documentos se actualizan desde Google Sheets")
+st.caption("🛡️ Kenzo Jeans – Gestión SGA · Los documentos se actualizan desde Google Sheets")
