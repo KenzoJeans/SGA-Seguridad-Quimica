@@ -44,7 +44,7 @@ COL_PICTO     = "PICTOGRAMA"
 EXPECTED_HEADERS = [COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_URL, COL_PICTO]
 
 # ─────────────────────────────────────────────
-# UTILIDADES: Google Sheets, Drive y descarga CSV
+# UTILIDADES: Google Sheets, descarga CSV
 # ─────────────────────────────────────────────
 def parse_sheet_url(url: str) -> Tuple[Optional[str], str]:
     if not url or not isinstance(url, str):
@@ -75,6 +75,7 @@ def try_download_csv(urls, timeout=15):
             resp = requests.get(u, headers=headers, timeout=timeout, allow_redirects=True)
             resp.raise_for_status()
             text = resp.text
+            # detectar si Google devolvió HTML (login / error)
             if text.strip().lower().startswith("<!doctype html") or ("login" in text.lower() and "google" in text.lower()):
                 last_err = f"Respuesta no es CSV válida desde {u}"
                 continue
@@ -103,6 +104,7 @@ def find_header_row(df: pd.DataFrame, expected_tokens=EXPECTED_HEADERS, search_r
                     break
         if count >= 2:
             return i
+    # fallback: buscar "sustancia" o "químico"
     for i in range(max_rows):
         row = df_str.iloc[i].astype(str).str.lower().tolist()
         if any("sustancia" in c or "químico" in c or "quimico" in c for c in row):
@@ -194,7 +196,9 @@ def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = pd.NA
 
     df[COL_SUSTANCIA] = df[COL_SUSTANCIA].fillna("").astype(str).str.strip()
-    df[COL_FAMILIA] = df[COL_FAMILIA].fillna("").astype(str).str.strip().replace("", "SIN FAMILIA")
+    # CORRECCIÓN: asegurar que FAMILIA no se convierta en booleano ni en otro tipo
+    df[COL_FAMILIA] = df[COL_FAMILIA].fillna("").astype(str).str.strip()
+    df[COL_FAMILIA] = df[COL_FAMILIA].replace("", "SIN FAMILIA").str.upper()
 
     def fmt_fecha(v):
         if pd.isna(v):
@@ -222,9 +226,6 @@ def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
     df[COL_VIGENCIA] = df[COL_VIGENCIA].apply(normalize_vigencia)
     df[COL_URL] = df[COL_URL].fillna("").astype(str).str.strip()
     df[COL_PICTO] = df[COL_PICTO].fillna("").astype(str).str.strip()
-    df[COL_FAMILIA] = df[COL_FAMILIA].fillna("SIN FAMILIA").astype(str).str_strip = False  # placeholder to avoid lint
-    # Re-apply correct family normalization
-    df[COL_FAMILIA] = df[COL_FAMILIA].fillna("SIN FAMILIA").astype(str).str.strip().str.upper()
     return df
 
 # ─────────────────────────────────────────────
@@ -335,7 +336,10 @@ for col in EXPECTED_HEADERS:
     if col not in df.columns:
         df[col] = pd.NA
 
+# Normalizar URLs de pictogramas (soporta enlaces de Drive)
 df[COL_PICTO] = df[COL_PICTO].fillna("").astype(str).apply(normalize_drive_url)
+
+# Asegurar columnas y normalizaciones finales (vigencia, familia, fecha)
 df = ensure_expected_columns(df)
 
 # ─────────────────────────────────────────────
