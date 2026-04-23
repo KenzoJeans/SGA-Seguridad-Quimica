@@ -10,14 +10,14 @@ from typing import Optional, Tuple, List
 # CONFIGURACIÓN DE PÁGINA
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="📄Repositorio Hojas de Seguridad (SGA) – Kenzo Jeans",
+    page_title="📄 Repositorio Hojas de Seguridad (SGA) – Kenzo Jeans",
     page_icon="⚗️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # ─────────────────────────────────────────────
-# ESTILOS LIGEROS
+# ESTILOS
 # ─────────────────────────────────────────────
 st.markdown(
     """
@@ -36,11 +36,11 @@ st.markdown(
 # COLUMNAS ESPERADAS
 # ─────────────────────────────────────────────
 COL_SUSTANCIA = "SUSTANCIA/QUÍMICO"
-COL_FAMILIA   = "FAMILIA"
-COL_FECHA     = "FECHA"
-COL_VIGENCIA  = "VIGENCIA"
-COL_URL       = "URL a Ficha de seguridad"
-COL_PICTO     = "PICTOGRAMA"
+COL_FAMILIA = "FAMILIA"
+COL_FECHA = "FECHA"
+COL_VIGENCIA = "VIGENCIA"
+COL_URL = "URL a Ficha de seguridad"
+COL_PICTO = "PICTOGRAMA"
 
 EXPECTED_HEADERS = [COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_URL, COL_PICTO]
 
@@ -194,7 +194,7 @@ def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = pd.NA
 
-    # Asegurar que todas las columnas sean strings para evitar conversiones a booleano
+    # Forzar strings para evitar conversiones a booleano
     for col in EXPECTED_HEADERS:
         df[col] = df[col].astype(str).fillna("").replace("nan", "")
 
@@ -232,25 +232,62 @@ def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────
 # NORMALIZAR ENLACES DE GOOGLE DRIVE (para mostrar imágenes)
 # ─────────────────────────────────────────────
-def normalize_drive_url(url: str) -> str:
-    if not isinstance(url, str):
-        return ""
+def normalize_drive_variants(url: str) -> List[str]:
+    if not isinstance(url, str) or not url.strip():
+        return []
     u = url.strip()
-    if u == "":
-        return ""
+    candidates = [u]
     m = re.search(r"/d/([a-zA-Z0-9_-]+)", u)
     if m:
-        file_id = m.group(1)
-        return f"https://drive.google.com/uc?export=view&id={file_id}"
+        fid = m.group(1)
+        candidates += [
+            f"https://drive.google.com/uc?export=view&id={fid}",
+            f"https://drive.google.com/uc?export=download&id={fid}",
+            f"https://drive.google.com/thumbnail?id={fid}",
+        ]
     m2 = re.search(r"open\?id=([a-zA-Z0-9_-]+)", u)
     if m2:
-        file_id = m2.group(1)
-        return f"https://drive.google.com/uc?export=view&id={file_id}"
+        fid = m2.group(1)
+        candidates += [
+            f"https://drive.google.com/uc?export=view&id={fid}",
+            f"https://drive.google.com/uc?export=download&id={fid}",
+        ]
     m3 = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", u)
     if m3:
-        file_id = m3.group(1)
-        return f"https://drive.google.com/uc?export=view&id={file_id}"
-    return u
+        fid = m3.group(1)
+        candidates += [
+            f"https://drive.google.com/uc?export=view&id={fid}",
+            f"https://drive.google.com/uc?export=download&id={fid}",
+        ]
+    seen = set(); out = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c); out.append(c)
+    return out
+
+def is_image_content_type(content_type: Optional[str]) -> bool:
+    if not content_type:
+        return False
+    return content_type.lower().startswith("image/")
+
+def probe_image_url(url: str, timeout: int = 6):
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; SGA-App/1.0)"}
+    try:
+        resp = requests.head(url, headers=headers, allow_redirects=True, timeout=5)
+        status = resp.status_code
+        ctype = resp.headers.get("Content-Type", "")
+        if resp.ok and ctype and is_image_content_type(ctype):
+            g = requests.get(url, headers=headers, allow_redirects=True, timeout=8)
+            g.raise_for_status()
+            return True, g.content, g.status_code, g.headers.get("Content-Type", "")
+        g = requests.get(url, headers=headers, allow_redirects=True, timeout=8)
+        status = g.status_code
+        ctype = g.headers.get("Content-Type", "")
+        if g.ok and ctype and is_image_content_type(ctype):
+            return True, g.content, status, ctype
+        return False, None, status, ctype
+    except requests.RequestException as e:
+        return False, None, None, str(e)
 
 # ─────────────────────────────────────────────
 # LECTURA ROBUSTA DE FUENTE (Google Sheet o archivo subido)
@@ -294,12 +331,8 @@ st.divider()
 
 with st.sidebar:
     st.header("🔎 Fuente de datos")
-    st.markdown("Pega la URL completa del Google Sheet o solo el ID. Si la descarga falla, sube el archivo (XLSX/CSV).")
-    sheet_input = st.text_input(
-        "URL o ID del Google Sheet",
-        value="https://docs.google.com/spreadsheets/d/1I06rgXcy1ACk50ApIGDVne8UbLFLClRe5wkWKT5KGAQ/edit?usp=sharing",
-    )
-    st.markdown("---")
+    st.markdown("Pega la URL completa del Google Sheet o sube el archivo (XLSX/CSV).")
+    sheet_input = st.text_input("URL o ID del Google Sheet", value="")
     uploaded_file = st.file_uploader("Subir XLSX o CSV (opcional)", type=["xlsx", "xls", "csv"])
     if st.button("🔄 Recargar datos"):
         try:
@@ -331,8 +364,7 @@ for col in EXPECTED_HEADERS:
     if col not in df.columns:
         df[col] = pd.NA
 
-# Normalizar pictograma URLs (soporta enlaces de Drive)
-df[COL_PICTO] = df[COL_PICTO].fillna("").astype(str).apply(normalize_drive_url)
+# No transformar aún; mantener la URL original y probar variantes al mostrar
 df = ensure_expected_columns(df)
 
 # ─────────────────────────────────────────────
@@ -343,7 +375,7 @@ if debug:
     st.sidebar.markdown("**Primeras filas (normalizadas)**")
     st.sidebar.dataframe(df[[COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_PICTO]].head(20))
     st.sidebar.markdown("**Ejemplo de URLs de pictograma**")
-    sample_urls = df[COL_PICTO].dropna().unique().tolist()[:10]
+    sample_urls = [u for u in df[COL_PICTO].unique().tolist() if u][:10]
     for u in sample_urls:
         st.sidebar.text(u)
 
@@ -394,7 +426,7 @@ for _, row in df_filtrado.iterrows():
     fecha = str(row.get(COL_FECHA, "")).strip() or "Sin fecha"
     vigencia = str(row.get(COL_VIGENCIA, "")).strip().upper() or "SIN DATO"
     url_doc = str(row.get(COL_URL, "")).strip()
-    url_picto = str(row.get(COL_PICTO, "")).strip()
+    url_picto_raw = str(row.get(COL_PICTO, "")).strip()
 
     es_vigente = vigencia == "VIGENTE"
     badge_cls = "badge-vigente" if es_vigente else "badge-novigente"
@@ -405,27 +437,35 @@ for _, row in df_filtrado.iterrows():
         st.markdown(f"**🏭 Familia / Categoría:** {familia}")
         st.markdown(f"**📅 Última revisión:** {fecha}")
         st.markdown(f"**📄 Vigencia:** <span class=\"{badge_cls}\">{badge_txt}</span>", unsafe_allow_html=True)
-
         st.write("")
 
-        # Mostrar pictograma: primero intentar con st.image(url), si falla, descargar bytes y mostrar
-        if url_picto and url_picto.lower().startswith("http"):
-            shown = False
-            try:
-                st.image(url_picto, caption="Pictograma SGA", width=120)
-                shown = True
-            except Exception:
-                shown = False
-            if not shown:
+        # Mostrar pictograma: probar variantes de Drive y fallback a bytes
+        shown = False
+        if url_picto_raw:
+            variants = normalize_drive_variants(url_picto_raw)
+            if url_picto_raw not in variants:
+                variants.append(url_picto_raw)
+            for v in variants:
+                # 1) intentar st.image(v) directo
                 try:
-                    resp = requests.get(url_picto, timeout=8)
-                    resp.raise_for_status()
-                    st.image(resp.content, caption="Pictograma SGA", width=120)
+                    st.image(v, caption="Pictograma SGA", width=120)
                     shown = True
+                    break
                 except Exception:
-                    shown = False
+                    # 2) intentar descargar bytes y mostrar
+                    ok, img_bytes, status, ctype = probe_image_url(v)
+                    if ok and img_bytes:
+                        try:
+                            st.image(img_bytes, caption="Pictograma SGA", width=120)
+                            shown = True
+                            break
+                        except Exception:
+                            shown = False
+                    # continuar con la siguiente variante
             if not shown:
-                st.write("⚗️ Pictograma no disponible")
+                st.write("⚗️ Pictograma no disponible. Posibles causas: enlace no público, Drive requiere autenticación, o la URL no apunta a una imagen.")
+                if debug:
+                    st.write("Variantes probadas:", variants)
         else:
             st.markdown(
                 "<div style='width:90px;height:90px;border:3px solid #e53935;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:2.2em;background:#fff3e0;'>⚗️</div>",
@@ -433,7 +473,6 @@ for _, row in df_filtrado.iterrows():
             )
 
         st.write("")
-
         if url_doc and url_doc.lower().startswith("http"):
             st.markdown(f"[📂 Abrir ficha de seguridad]({url_doc})")
         else:
