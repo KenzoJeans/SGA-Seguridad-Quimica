@@ -297,7 +297,7 @@ with st.sidebar:
             st.cache_data.clear()
         except Exception:
             pass
-        st.experimental_rerun()
+        st.rerun()
 
 # ─────────────────────────────────────────────
 # CARGAR DATOS
