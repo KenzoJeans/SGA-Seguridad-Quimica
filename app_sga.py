@@ -294,6 +294,12 @@ def probe_image_url(url: str, timeout: int = 6):
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=600, show_spinner="Cargando fichas de seguridad…")
 def cargar_datos(sheet_input: Optional[str] = None, uploaded_file=None) -> pd.DataFrame:
+    """
+    Si no se proporciona ni archivo ni sheet_input, devuelve un DataFrame vacío
+    con las columnas esperadas (no lanza excepción). Esto evita errores al pulsar
+    recargar sin entrada.
+    """
+    # 1) archivo subido
     if uploaded_file is not None:
         filename = getattr(uploaded_file, "name", "").lower()
         if filename.endswith((".xls", ".xlsx")):
@@ -308,6 +314,7 @@ def cargar_datos(sheet_input: Optional[str] = None, uploaded_file=None) -> pd.Da
                 text = uploaded_file.getvalue().decode("latin-1")
             return read_with_detected_header_from_csv_text(text)
 
+    # 2) Google Sheet
     if sheet_input:
         sheet_id, gid = parse_sheet_url(sheet_input)
         if not sheet_id:
@@ -320,7 +327,10 @@ def cargar_datos(sheet_input: Optional[str] = None, uploaded_file=None) -> pd.Da
             raise ConnectionError(f"No se pudo descargar CSV: {err}")
         return read_with_detected_header_from_csv_text(csv_text)
 
-    raise ValueError("No se proporcionó archivo ni URL/ID del Google Sheet.")
+    # Si no hay entrada, devolver DataFrame vacío con columnas esperadas
+    empty = pd.DataFrame(columns=EXPECTED_HEADERS)
+    empty = ensure_expected_columns(empty)
+    return empty
 
 # ─────────────────────────────────────────────
 # INTERFAZ: entrada y subida
@@ -357,15 +367,17 @@ except Exception as e:
     st.stop()
 
 # ─────────────────────────────────────────────
-# Normalizar pictograma Drive y columnas finales
+# Normalizar columnas y preparar datos
 # ─────────────────────────────────────────────
 df.columns = [c.strip() for c in df.columns]
-for col in EXPECTED_HEADERS:
-    if col not in df.columns:
-        df[col] = pd.NA
-
-# No transformar aún; mantener la URL original y probar variantes al mostrar
 df = ensure_expected_columns(df)
+
+# ─────────────────────────────────────────────
+# Si no hay datos, mostrar mensaje y permitir al usuario subir o pegar
+# ─────────────────────────────────────────────
+if df.empty or (len(df) == 0):
+    st.info("No se han cargado fichas todavía. Sube un archivo XLSX/CSV o pega la URL/ID del Google Sheet en la barra lateral.")
+    st.stop()
 
 # ─────────────────────────────────────────────
 # DEBUG OPCIONAL: mostrar primeras filas y URLs de pictogramas
