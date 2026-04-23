@@ -73,19 +73,15 @@ st.divider()
 # CARGA DE DATOS
 # ─────────────────────────────────────────────
 # ──────────────────────────────────────────────────────────────────
-# ⚠️  INSTRUCCIÓN: reemplaza el ID del Sheet en la línea siguiente.
-#     El ID está en la URL de tu Google Sheet, entre /d/ y /edit o /view
-#     Ejemplo: https://docs.google.com/spreadsheets/d/ ►ESTE_ID◄ /edit
-#     El Sheet debe estar compartido como "Cualquier persona con el enlace → Lector"
+# ⚠️  INSTRUCCIÓN: coloca solo el ID del Sheet (la parte entre /d/ y /edit)
 # ──────────────────────────────────────────────────────────────────
-SHEET_ID  = "1I06rgXcy1ACk50ApIGDVne8UbLFLClRe5wkWKT5KGAQ/edit?usp=sharing"   # ← pon aquí tu ID
-SHEET_GID = "0"                                     # pestaña 0 = primera hoja
+# ID extraído de:
+# https://docs.google.com/spreadsheets/d/1I06rgXcy1ACk50ApIGDVne8UbLFLClRe5wkWKT5KGAQ/edit?usp=sharing
+SHEET_ID  = "1I06rgXcy1ACk50ApIGDVne8UbLFLClRe5wkWKT5KGAQ"   # ← solo el ID, sin /edit...
+SHEET_GID = "0"                                            # pestaña 0 = primera hoja
 
-# URL de exportación CSV directa — no necesita credenciales
-CSV_URL = (
-    f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
-    f"1I06rgXcy1ACk50ApIGDVne8UbLFLClRe5wkWKT5KGAQ/edit?usp=sharing={SHEET_GID}"
-)
+# URL de exportación CSV directa — formato correcto para Google Sheets
+CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={SHEET_GID}"
 
 # Nombres de columnas (deben coincidir exactamente con la fila 1 del Sheet)
 COL_SUSTANCIA = "SUSTANCIA/QUÍMICO"
@@ -97,14 +93,40 @@ COL_PICTO     = "PICTOGRAMA"
 
 @st.cache_data(ttl=600, show_spinner="Cargando fichas de seguridad…")
 def cargar_datos(csv_url: str) -> pd.DataFrame:
+    """
+    Lee el CSV exportado desde Google Sheets y normaliza columnas clave.
+    Se agregan columnas vacías si faltan para evitar KeyError.
+    """
+    # Leer CSV (si la URL está mal, pandas leerá HTML o fallará)
     df = pd.read_csv(csv_url)
-    df.columns = [c.strip() for c in df.columns]          # quitar espacios extras
-    # Asegurar que exista la columna de pictograma aunque esté vacía
-    if COL_PICTO not in df.columns:
-        df[COL_PICTO] = None
-    # Normalizar campos clave
-    df[COL_VIGENCIA] = df[COL_VIGENCIA].fillna("").str.strip().str.upper()
-    df[COL_FAMILIA]  = df[COL_FAMILIA].fillna("SIN FAMILIA").str.strip().str.upper()
+
+    # Normalizar nombres de columnas (quitar espacios extras)
+    df.columns = [c.strip() for c in df.columns]
+
+    # Asegurar que existan las columnas esperadas; si faltan, crearlas vacías
+    expected_cols = [COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_URL, COL_PICTO]
+    for col in expected_cols:
+        if col not in df.columns:
+            # Crear columna con valores nulos (o cadena vacía para VIGENCIA)
+            if col == COL_VIGENCIA:
+                df[col] = ""
+            else:
+                df[col] = pd.NA
+
+    # Normalizar campos clave sin lanzar KeyError
+    # VIGENCIA: convertir a mayúsculas, quitar espacios y rellenar vacíos
+    df[COL_VIGENCIA] = df[COL_VIGENCIA].fillna("").astype(str).str.strip().str.upper()
+
+    # FAMILIA: rellenar con valor por defecto si falta
+    df[COL_FAMILIA] = df[COL_FAMILIA].fillna("SIN FAMILIA").astype(str).str.strip().str.upper()
+
+    # SUSTANCIA: asegurar tipo string y quitar espacios
+    df[COL_SUSTANCIA] = df[COL_SUSTANCIA].fillna("").astype(str).str.strip()
+
+    # URL y PICTOGRAMA: limpiar espacios
+    df[COL_URL] = df[COL_URL].fillna("").astype(str).str.strip()
+    df[COL_PICTO] = df[COL_PICTO].fillna("").astype(str).str.strip()
+
     return df
 
 try:
@@ -112,8 +134,9 @@ try:
 except Exception as e:
     st.error(
         "❌ No se pudo leer el Google Sheet. "
-        "Verifica que: (1) el SHEET_ID sea correcto, "
-        "(2) el Sheet esté compartido como público (Lector)."
+        "Verifica que: (1) el SHEET_ID sea correcto (solo el ID), "
+        "(2) el Sheet esté compartido como público (Lector), "
+        "y (3) la pestaña (gid) sea la correcta."
     )
     st.exception(e)
     st.stop()
@@ -132,7 +155,7 @@ with st.sidebar:
     )
 
     # Filtro de familia
-    familias_disponibles = sorted(df[COL_FAMILIA].unique().tolist())
+    familias_disponibles = sorted(df[COL_FAMILIA].replace("", "SIN FAMILIA").unique().tolist())
     familias_sel = st.multiselect(
         "Familia / categoría",
         options=familias_disponibles,
@@ -149,7 +172,7 @@ with st.sidebar:
 
     st.divider()
 
-    # Métricas rápidas
+    # Métricas rápidas (usar columnas ya garantizadas)
     total      = len(df)
     vigentes   = (df[COL_VIGENCIA] == "VIGENTE").sum()
     novigentes = total - vigentes
@@ -159,17 +182,22 @@ with st.sidebar:
 
     st.divider()
     if st.button("🔄 Recargar datos"):
-        st.cache_data.clear()
-        st.rerun()
+        # Limpiar cache y recargar
+        try:
+            st.cache_data.clear()
+        except Exception:
+            # En caso de que la API cambie, forzamos rerun igualmente
+            pass
+        st.experimental_rerun()
 
 # ─────────────────────────────────────────────
 # APLICAR FILTROS
 # ─────────────────────────────────────────────
 df_filtrado = df.copy()
 
-# Filtro texto
-if busqueda.strip():
-    mask = df_filtrado[COL_SUSTANCIA].str.contains(
+# Filtro texto (si la columna SUSTANCIA/QUÍMICO está vacía, evitar error)
+if busqueda and busqueda.strip():
+    mask = df_filtrado[COL_SUSTANCIA].astype(str).str.contains(
         busqueda.strip(), case=False, na=False
     )
     df_filtrado = df_filtrado[mask]
@@ -199,12 +227,12 @@ st.caption("Haz clic en el nombre de la sustancia para ver el detalle completo."
 # TARJETAS EXPANDIBLES
 # ─────────────────────────────────────────────
 for _, row in df_filtrado.iterrows():
-    sustancia = str(row.get(COL_SUSTANCIA, "—")).strip()
-    familia   = str(row.get(COL_FAMILIA,   "—")).strip()
+    sustancia = str(row.get(COL_SUSTANCIA, "—")).strip() or "—"
+    familia   = str(row.get(COL_FAMILIA,   "—")).strip() or "—"
     fecha     = row.get(COL_FECHA, None)
     vigencia  = str(row.get(COL_VIGENCIA,  "")).strip().upper()
-    url_doc   = row.get(COL_URL,  None)
-    url_picto = row.get(COL_PICTO, None)
+    url_doc   = row.get(COL_URL,  "")
+    url_picto = row.get(COL_PICTO, "")
 
     es_vigente = vigencia == "VIGENTE"
     emoji_est  = "✅" if es_vigente else "⚠️"
@@ -232,12 +260,13 @@ for _, row in df_filtrado.iterrows():
         with col_accion:
             # Pictograma SGA (si hay URL de imagen)
             tiene_picto = (
-                pd.notna(url_picto)
-                and str(url_picto).strip().startswith("http")
+                isinstance(url_picto, str)
+                and url_picto.strip() != ""
+                and url_picto.strip().startswith("http")
             )
             if tiene_picto:
                 st.image(
-                    str(url_picto).strip(),
+                    url_picto.strip(),
                     caption="Pictograma SGA",
                     width=120,
                 )
@@ -257,15 +286,21 @@ for _, row in df_filtrado.iterrows():
 
             # Botón de enlace
             tiene_url = (
-                pd.notna(url_doc)
-                and str(url_doc).strip().startswith("http")
+                isinstance(url_doc, str)
+                and url_doc.strip() != ""
+                and url_doc.strip().startswith("http")
             )
             if tiene_url:
-                st.link_button(
-                    "📂 Abrir ficha de seguridad",
-                    str(url_doc).strip(),
-                    use_container_width=True,
-                )
+                # st.link_button está disponible en versiones recientes de Streamlit
+                try:
+                    st.link_button(
+                        "📂 Abrir ficha de seguridad",
+                        url_doc.strip(),
+                        use_container_width=True,
+                    )
+                except Exception:
+                    # Fallback: mostrar enlace como markdown
+                    st.markdown(f"[📂 Abrir ficha de seguridad]({url_doc.strip()})")
             else:
                 st.warning("🔗 Enlace no disponible")
 
