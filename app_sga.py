@@ -10,7 +10,7 @@ from typing import Optional, Tuple, List
 # CONFIGURACIÓN DE PÁGINA
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="SGA – Kenzo Jeans",
+    page_title="Repositorio Hojas de Seguridad (SGA) – Kenzo Jeans",
     page_icon="⚗️",
     layout="wide",
     initial_sidebar_state="expanded",
