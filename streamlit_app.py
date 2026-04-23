@@ -1,6 +1,10 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
+from st_gsheets_connection import GSheetsConnection # <--- Cambia esta línea
 import pandas as pd
+
+st.set_page_config(page_title="SGA - Kenzo Jeans", page_icon="🛡️", layout="wide")
+
+# ... (el resto del código sigue igual)
 
 st.set_page_config(page_title="SGA - Kenzo Jeans", page_icon="🛡️", layout="wide")
 
