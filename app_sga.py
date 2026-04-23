@@ -11,7 +11,7 @@ from typing import Optional, Tuple, List
 # ─────────────────────────────────────────────
 st.set_page_config(
     page_title="SGA – Kenzo Jeans",
-    page_icon="🛡️",
+    page_icon="⚗️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
