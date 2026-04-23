@@ -4,10 +4,10 @@ import io
 import requests
 import streamlit as st
 import pandas as pd
-from typing import List, Tuple
+from typing import Optional, Tuple
 
 # ─────────────────────────────────────────────
-# CONFIGURACIÓN DE PÁGINA
+# Configuración de página
 # ─────────────────────────────────────────────
 st.set_page_config(
     page_title="SGA – Kenzo Jeans",
@@ -16,9 +16,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─────────────────────────────────────────────
-# ESTILOS LIGEROS
-# ─────────────────────────────────────────────
+# Estilos ligeros
 st.markdown(
     """
 <style>
@@ -32,7 +30,7 @@ st.markdown(
 )
 
 # ─────────────────────────────────────────────
-# COLUMNAS ESPERADAS
+# Columnas esperadas (tal como aparecen en tu Sheet)
 # ─────────────────────────────────────────────
 COL_SUSTANCIA = "SUSTANCIA/QUÍMICO"
 COL_FAMILIA   = "FAMILIA"
@@ -41,12 +39,14 @@ COL_VIGENCIA  = "VIGENCIA"
 COL_URL       = "URL a Ficha de seguridad"
 COL_PICTO     = "PICTOGRAMA"
 
+EXPECTED_HEADERS = [COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_URL, COL_PICTO]
+
 # ─────────────────────────────────────────────
-# UTILIDADES PARA GOOGLE SHEETS
+# Utilidades Google Sheets
 # ─────────────────────────────────────────────
-def parse_sheet_url(url: str) -> Tuple[str, str]:
+def parse_sheet_url(url: str) -> Tuple[Optional[str], str]:
     if not url or not isinstance(url, str):
-        return None, None
+        return None, "0"
     s = url.strip()
     m = re.search(r"/d/([a-zA-Z0-9-_]+)", s)
     sheet_id = m.group(1) if m else None
@@ -56,7 +56,7 @@ def parse_sheet_url(url: str) -> Tuple[str, str]:
     gid = m_gid.group(1) if m_gid else "0"
     return sheet_id, gid
 
-def build_candidate_csv_urls(sheet_id: str, gid: str = "0") -> List[str]:
+def build_csv_urls(sheet_id: str, gid: str = "0"):
     urls = []
     if not sheet_id:
         return urls
@@ -66,11 +66,8 @@ def build_candidate_csv_urls(sheet_id: str, gid: str = "0") -> List[str]:
     return urls
 
 def try_download_csv(urls, timeout=15):
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; SGA-App/1.0)", "Accept": "text/csv, */*; q=0.1"}
     last_err = None
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; SGA-App/1.0)",
-        "Accept": "text/csv, */*; q=0.1",
-    }
     for u in urls:
         try:
             resp = requests.get(u, headers=headers, timeout=timeout, allow_redirects=True)
@@ -88,132 +85,86 @@ def try_download_csv(urls, timeout=15):
     return None, last_err
 
 # ─────────────────────────────────────────────
-# PARSEO ROBUSTO: cuando el Excel/CSV está desalineado
+# Detección robusta de fila de encabezado
 # ─────────────────────────────────────────────
-def _looks_like_url(s: str) -> bool:
-    if not isinstance(s, str):
-        return False
-    s = s.strip().lower()
-    return s.startswith("http") or "drive.google" in s or "docs.google" in s
-
-def _looks_like_date_token(s: str) -> bool:
-    if not isinstance(s, str):
-        return False
-    s = s.strip()
-    # Excel serial numbers (e.g., 45390.0) or strings with / or -
-    if re.match(r"^\d{4,}\.0?$", s) or re.match(r"^\d{5,}$", s):
-        return True
-    if re.search(r"[/-]", s):
-        return True
-    return False
-
-def _flatten_dataframe_cells(df: pd.DataFrame) -> List[str]:
+def find_header_row(df: pd.DataFrame, expected_tokens=EXPECTED_HEADERS, search_rows: int = 20) -> Optional[int]:
     """
-    Devuelve una lista de celdas no vacías en orden de lectura (fila por fila),
-    útil para hojas donde cada registro ocupa varias filas en una sola columna.
+    Busca la fila que contiene los encabezados reales. Recorre las primeras `search_rows`
+    filas y devuelve el índice de la fila que contiene la mayoría de tokens esperados.
     """
-    flat = []
-    for _, row in df.iterrows():
-        for val in row.tolist():
-            if pd.isna(val):
-                continue
-            s = str(val).strip()
-            if s != "":
-                flat.append(s)
-    return flat
-
-def parse_flat_cells_to_records(flat: List[str]) -> pd.DataFrame:
-    """
-    Heurística para convertir una lista plana de celdas en registros con columnas:
-    SUSTANCIA/QUÍMICO, FAMILIA, FECHA, VIGENCIA, URL a Ficha de seguridad, PICTOGRAMA
-    """
-    records = []
-    i = 0
-    while i < len(flat):
-        # Buscar nombre (sustancia): preferir cadenas que no sean URL y no parezcan fecha
-        name = ""
-        family = ""
-        fecha = ""
-        vigencia = ""
-        url = ""
-        picto = ""
-
-        # 1) Nombre: la primera celda que no sea URL
-        if not _looks_like_url(flat[i]):
-            name = flat[i]
-            i += 1
-        else:
-            # si la celda es URL pero no hay nombre, saltarla
-            i += 1
-            continue
-
-        # 2) Intentar asignar siguientes tokens a familia / fecha / vigencia / url / picto
-        # Mirar hasta 6 tokens siguientes como máximo para completar el registro
-        look_ahead = 0
-        while i < len(flat) and look_ahead < 8:
-            token = flat[i]
-            if _looks_like_url(token):
-                if url == "":
-                    url = token
-                elif picto == "":
-                    picto = token
-                else:
-                    # si ya hay url y picto, probablemente es el inicio de la siguiente ficha
+    # Normalizar a strings
+    df_str = df.fillna("").astype(str)
+    max_rows = min(search_rows, len(df_str))
+    expected_lower = [t.lower() for t in expected_tokens]
+    for i in range(max_rows):
+        row = df_str.iloc[i].astype(str).str.lower().tolist()
+        # contar cuántos tokens esperados aparecen en esa fila
+        count = 0
+        for token in expected_lower:
+            for cell in row:
+                if token in cell:
+                    count += 1
                     break
-                i += 1
-            elif _looks_like_date_token(token) and fecha == "":
-                fecha = token
-                i += 1
-            elif token.strip().upper() in ("VIGENTE", "NO VIGENTE", "SIN DATO", "N/A"):
-                vigencia = token
-                i += 1
-            else:
-                # Si family está vacío y token es corto o todo mayúsculas, asignar familia
-                if family == "":
-                    # heurística: si token es una palabra corta o contiene 'AUX'/'GENERIC'/'PLANTA' etc.
-                    if len(token.split()) <= 4 or any(k in token.upper() for k in ["AUX", "GENERIC", "PLANTA", "COLOR", "PIGMENTO", "SUAVIZ", "ENZIMAS", "REDUCTORES"]):
-                        family = token
-                        i += 1
-                    else:
-                        # si token tiene muchas palabras, puede ser parte del nombre de la sustancia (apéndice)
-                        # en ese caso, si name no contiene números ni '/', lo concatenamos
-                        if len(name.split()) < 6 and not _looks_like_date_token(token):
-                            name = f"{name} {token}"
-                            i += 1
-                        else:
-                            break
-                else:
-                    # family ya existe; si fecha vacío y token parece fecha, asignar; si no, puede ser parte del nombre siguiente
-                    if fecha == "" and _looks_like_date_token(token):
-                        fecha = token
-                        i += 1
-                    else:
-                        # probablemente inicio de siguiente registro
-                        break
-            look_ahead += 1
+        # si encontramos al menos 2 tokens (SUSTANCIA y FAMILIA) o la mayoría, lo consideramos header
+        if count >= 2:
+            return i
+    # fallback: buscar fila que contenga exactamente "SUSTANCIA" o "SUSTANCIA/QUÍMICO"
+    for i in range(max_rows):
+        row = df_str.iloc[i].astype(str).str.lower().tolist()
+        if any("sustancia" in c or "químico" in c or "quimico" in c for c in row):
+            return i
+    return None
 
-        # Guardar registro si hay al menos un nombre
-        if name:
-            records.append({
-                COL_SUSTANCIA: name.strip(),
-                COL_FAMILIA: family.strip() if family else "SIN FAMILIA",
-                COL_FECHA: fecha.strip(),
-                COL_VIGENCIA: vigencia.strip().upper() if vigencia else "",
-                COL_URL: url.strip(),
-                COL_PICTO: picto.strip(),
-            })
-        # si no avanzó (para evitar bucle infinito), avanzar uno
-        if look_ahead == 0:
-            i += 1
+def read_with_detected_header_from_csv_text(csv_text: str) -> pd.DataFrame:
+    """
+    Lee CSV como header=None, detecta la fila de encabezado y devuelve DataFrame con columnas correctas.
+    """
+    raw = pd.read_csv(io.StringIO(csv_text), header=None, dtype=str)
+    header_idx = find_header_row(raw, EXPECTED_HEADERS, search_rows=30)
+    if header_idx is not None:
+        # construir header a partir de esa fila y tomar los datos siguientes
+        header = raw.iloc[header_idx].astype(str).tolist()
+        df = raw.iloc[header_idx + 1 :].copy().reset_index(drop=True)
+        df.columns = [str(h).strip() if str(h).strip() != "" else f"col_{i}" for i, h in enumerate(header)]
+    else:
+        # si no se detecta header, intentar leer con header=0 (por si el CSV ya está bien)
+        try:
+            df = pd.read_csv(io.StringIO(csv_text), header=0, dtype=str)
+        except Exception:
+            # fallback: usar raw y aplanar
+            df = raw.copy()
+            df.columns = [f"col_{i}" for i in range(df.shape[1])]
+    df = ensure_expected_columns(df)
+    return df
 
-    df = pd.DataFrame(records, columns=[COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_URL, COL_PICTO])
+def read_excel_with_detected_header(uploaded_file) -> pd.DataFrame:
+    """
+    Lee XLSX/XLS intentando detectar la fila de encabezado.
+    """
+    # leer sin header para inspeccionar las primeras filas
+    raw = pd.read_excel(uploaded_file, header=None, engine="openpyxl")
+    header_idx = find_header_row(raw, EXPECTED_HEADERS, search_rows=30)
+    if header_idx is not None:
+        header = raw.iloc[header_idx].astype(str).tolist()
+        df = raw.iloc[header_idx + 1 :].copy().reset_index(drop=True)
+        df.columns = [str(h).strip() if str(h).strip() != "" else f"col_{i}" for i, h in enumerate(header)]
+    else:
+        # intentar leer con header=0 (caso en que la primera fila ya es header)
+        uploaded_file.seek(0)
+        try:
+            df = pd.read_excel(uploaded_file, header=0, engine="openpyxl")
+        except Exception:
+            # fallback: usar raw y renombrar columnas genéricas
+            df = raw.copy()
+            df.columns = [f"col_{i}" for i in range(df.shape[1])]
+    df = ensure_expected_columns(df)
     return df
 
 # ─────────────────────────────────────────────
-# NORMALIZACIÓN FINAL
+# Normalización final de columnas y valores
 # ─────────────────────────────────────────────
-def _ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # Mapear nombres de columna variantes a los esperados
+def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # mapear variantes de nombres a los esperados
     cols_map = {}
     for c in df.columns:
         cl = str(c).strip().lower()
@@ -232,22 +183,21 @@ def _ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
     if cols_map:
         df = df.rename(columns=cols_map)
 
-    # Añadir columnas faltantes
-    for col in [COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_URL, COL_PICTO]:
+    # añadir columnas faltantes
+    for col in EXPECTED_HEADERS:
         if col not in df.columns:
             df[col] = pd.NA
 
-    # Limpiar y formatear
+    # limpiar y formatear
     df[COL_SUSTANCIA] = df[COL_SUSTANCIA].fillna("").astype(str).str.strip()
     df[COL_FAMILIA] = df[COL_FAMILIA].fillna("").astype(str).str.strip().replace("", "SIN FAMILIA")
     # FECHA: intentar convertir seriales Excel a dd/mm/YYYY
-    def _fmt_fecha(v):
+    def fmt_fecha(v):
         if pd.isna(v):
             return ""
         s = str(v).strip()
         if s.upper() in ("N/A", "SIN DATO", ""):
             return ""
-        # excel serial heuristic
         if re.match(r"^\d+(\.0+)?$", s):
             try:
                 num = int(float(s))
@@ -256,7 +206,6 @@ def _ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
                     return dt.strftime("%d/%m/%Y")
             except Exception:
                 pass
-        # try parse with pandas
         try:
             dt = pd.to_datetime(s, dayfirst=True, errors="coerce")
             if pd.notna(dt):
@@ -265,7 +214,7 @@ def _ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
             pass
         return s
 
-    df[COL_FECHA] = df[COL_FECHA].apply(_fmt_fecha)
+    df[COL_FECHA] = df[COL_FECHA].apply(fmt_fecha)
     df[COL_VIGENCIA] = df[COL_VIGENCIA].fillna("").astype(str).str.strip().str.upper()
     df[COL_URL] = df[COL_URL].fillna("").astype(str).str.strip()
     df[COL_PICTO] = df[COL_PICTO].fillna("").astype(str).str.strip()
@@ -273,114 +222,43 @@ def _ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ─────────────────────────────────────────────
-# LECTURA ROBUSTA DE FUENTE (Google Sheet o archivo subido)
+# Cargar datos (prioriza archivo subido, si no intenta Google Sheet)
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=600, show_spinner="Cargando fichas de seguridad…")
-def cargar_datos(sheet_input: str = None, uploaded_file=None) -> pd.DataFrame:
-    # 1) Si el usuario subió un archivo, priorizarlo
+def cargar_datos(sheet_input: Optional[str] = None, uploaded_file=None) -> pd.DataFrame:
+    # 1) archivo subido
     if uploaded_file is not None:
-        filename = getattr(uploaded_file, "name", "")
-        try:
-            if filename.lower().endswith((".xls", ".xlsx")):
-                # leer sin header para detectar encabezado real
-                raw = pd.read_excel(uploaded_file, header=None, engine="openpyxl")
-                # si la hoja ya tiene encabezados correctos en la primera fila, pandas puede leerlos
-                # intentar detectar si la primera fila contiene los tokens esperados
-                first_row = raw.iloc[0].astype(str).str.lower().tolist()
-                if any("sustancia" in c for c in first_row) or any("químico" in c for c in first_row) or any("famil" in c for c in first_row):
-                    # volver a leer con header=0
-                    uploaded_file.seek(0)
-                    df = pd.read_excel(uploaded_file, header=0, engine="openpyxl")
-                    df = _ensure_expected_columns(df)
-                    return df
-                else:
-                    # normalizar desde raw
-                    df = _normalize_from_raw_excel(raw)
-                    df = _ensure_expected_columns(df)
-                    return df
-            else:
-                # CSV: intentar leer con header=0; si falla, leer sin header y normalizar
-                try:
-                    uploaded_file.seek(0)
-                    csv_text = uploaded_file.getvalue().decode("utf-8")
-                except Exception:
-                    uploaded_file.seek(0)
-                    csv_text = uploaded_file.getvalue().decode("latin-1")
-                try:
-                    df = pd.read_csv(io.StringIO(csv_text), header=0)
-                    df = _ensure_expected_columns(df)
-                    # if df has very few columns and many rows with single values, flatten
-                    non_empty_cols = df.dropna(how="all", axis=1).shape[1]
-                    if non_empty_cols <= 1:
-                        flat = _flatten_dataframe_cells(df)
-                        df = parse_flat_cells_to_records(flat)
-                        df = _ensure_expected_columns(df)
-                    return df
-                except Exception:
-                    raw = pd.read_csv(io.StringIO(csv_text), header=None)
-                    flat = _flatten_dataframe_cells(raw)
-                    df = parse_flat_cells_to_records(flat)
-                    df = _ensure_expected_columns(df)
-                    return df
-        except Exception as e:
-            raise RuntimeError(f"Error leyendo el archivo subido: {e}")
+        name = getattr(uploaded_file, "name", "").lower()
+        if name.endswith((".xls", ".xlsx")):
+            uploaded_file.seek(0)
+            return read_excel_with_detected_header(uploaded_file)
+        else:
+            # CSV subido
+            uploaded_file.seek(0)
+            try:
+                text = uploaded_file.getvalue().decode("utf-8")
+            except Exception:
+                uploaded_file.seek(0)
+                text = uploaded_file.getvalue().decode("latin-1")
+            return read_with_detected_header_from_csv_text(text)
 
-    # 2) Si no hay archivo, intentar descargar desde Google Sheets
+    # 2) intentar Google Sheet
     if sheet_input:
         sheet_id, gid = parse_sheet_url(sheet_input)
         if not sheet_id:
             raise ValueError("No se pudo extraer el ID del Google Sheet desde la entrada proporcionada.")
-        urls = build_candidate_csv_urls(sheet_id, gid)
+        urls = build_csv_urls(sheet_id, gid)
         if not urls:
             raise ValueError("No se pudo construir una URL válida para descargar el CSV.")
-        csv_text, download_error = try_download_csv(urls, timeout=15)
+        csv_text, err = try_download_csv(urls, timeout=15)
         if csv_text is None:
-            raise ConnectionError(f"No se pudo descargar CSV: {download_error}")
-        # intentar parsear CSV con header=0
-        try:
-            df = pd.read_csv(io.StringIO(csv_text), header=0)
-            df = _ensure_expected_columns(df)
-            non_empty_cols = df.dropna(how="all", axis=1).shape[1]
-            if non_empty_cols <= 1:
-                flat = _flatten_dataframe_cells(df)
-                df = parse_flat_cells_to_records(flat)
-                df = _ensure_expected_columns(df)
-            return df
-        except Exception:
-            raw = pd.read_csv(io.StringIO(csv_text), header=None)
-            flat = _flatten_dataframe_cells(raw)
-            df = parse_flat_cells_to_records(flat)
-            df = _ensure_expected_columns(df)
-            return df
+            raise ConnectionError(f"No se pudo descargar CSV: {err}")
+        return read_with_detected_header_from_csv_text(csv_text)
 
     raise ValueError("No se proporcionó archivo ni URL/ID del Google Sheet.")
 
-# Helper reutilizable para normalizar raw excel (header=None)
-def _normalize_from_raw_excel(raw: pd.DataFrame) -> pd.DataFrame:
-    # Convertir todo a string para búsqueda
-    raw_str = raw.fillna("").astype(str)
-    header_row_idx = None
-    expected_tokens = [COL_SUSTANCIA.lower(), COL_FAMILIA.lower(), COL_FECHA.lower(), COL_VIGENCIA.lower()]
-    for i in range(min(10, len(raw_str))):
-        row_text = " ".join(raw_str.iloc[i].str.lower().tolist())
-        if any("sustancia" in row_text or "químico" in row_text for _ in (0,)) and ("famil" in row_text or "familia" in row_text):
-            header_row_idx = i
-            break
-    if header_row_idx is not None:
-        header = raw_str.iloc[header_row_idx].tolist()
-        df = raw.iloc[header_row_idx + 1 :].copy()
-        df.columns = [str(h).strip() if str(h).strip() != "" else f"col_{i}" for i, h in enumerate(header)]
-        df = df.reset_index(drop=True)
-        df = _ensure_expected_columns(df)
-        return df
-    # Si no se detecta encabezado, aplanar y parsear
-    flat = _flatten_dataframe_cells(raw)
-    df = parse_flat_cells_to_records(flat)
-    df = _ensure_expected_columns(df)
-    return df
-
 # ─────────────────────────────────────────────
-# INTERFAZ: entrada y subida
+# Interfaz
 # ─────────────────────────────────────────────
 st.title("Repositorio Hojas de Seguridad — SGA")
 st.caption("Sistema Globalmente Armonizado · Kenzo Jeans · Consulta rápida de fichas de seguridad químicas")
@@ -403,7 +281,7 @@ with st.sidebar:
         st.experimental_rerun()
 
 # ─────────────────────────────────────────────
-# CARGAR DATOS
+# Cargar y manejar errores
 # ─────────────────────────────────────────────
 try:
     df = cargar_datos(sheet_input if sheet_input else None, uploaded_file)
@@ -418,7 +296,7 @@ except Exception as e:
     st.stop()
 
 # ─────────────────────────────────────────────
-# SIDEBAR: filtros y métricas
+# Sidebar: filtros y métricas
 # ─────────────────────────────────────────────
 with st.sidebar:
     st.header("🔎 Filtros")
@@ -435,23 +313,20 @@ with st.sidebar:
     st.markdown(f"**⚠️ No vigentes:** {novigentes}")
 
 # ─────────────────────────────────────────────
-# APLICAR FILTROS
+# Aplicar filtros
 # ─────────────────────────────────────────────
 df_filtrado = df.copy()
-
 if busqueda and busqueda.strip():
     df_filtrado = df_filtrado[df_filtrado[COL_SUSTANCIA].astype(str).str.contains(busqueda.strip(), case=False, na=False)]
-
 if familias_sel:
     df_filtrado = df_filtrado[df_filtrado[COL_FAMILIA].isin(familias_sel)]
-
 if estado_sel == "✅ Vigentes":
     df_filtrado = df_filtrado[df_filtrado[COL_VIGENCIA] == "VIGENTE"]
 elif estado_sel == "⚠️ No vigentes":
     df_filtrado = df_filtrado[df_filtrado[COL_VIGENCIA] != "VIGENTE"]
 
 # ─────────────────────────────────────────────
-# RESULTADOS
+# Resultados: mostrar Nombre como título y detalles debajo
 # ─────────────────────────────────────────────
 n = len(df_filtrado)
 if n == 0:
