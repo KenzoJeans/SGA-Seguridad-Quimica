@@ -1,5 +1,4 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 
 # ─────────────────────────────────────────────
@@ -73,33 +72,48 @@ st.divider()
 # ─────────────────────────────────────────────
 # CARGA DE DATOS
 # ─────────────────────────────────────────────
-URL_SHEET = "https://docs.google.com/spreadsheets/d/1XwmNLHeeoD3UW41LvfltLA1m4ZexweNi/view"
+# ──────────────────────────────────────────────────────────────────
+# ⚠️  INSTRUCCIÓN: reemplaza el ID del Sheet en la línea siguiente.
+#     El ID está en la URL de tu Google Sheet, entre /d/ y /edit o /view
+#     Ejemplo: https://docs.google.com/spreadsheets/d/ ►ESTE_ID◄ /edit
+#     El Sheet debe estar compartido como "Cualquier persona con el enlace → Lector"
+# ──────────────────────────────────────────────────────────────────
+SHEET_ID  = "1XwmNLHeeoD3UW41LvfltLA1m4ZexweNi"   # ← pon aquí tu ID
+SHEET_GID = "0"                                     # pestaña 0 = primera hoja
 
-# Nombre exacto de la columna URL en el Sheet
+# URL de exportación CSV directa — no necesita credenciales
+CSV_URL = (
+    f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
+    f"/export?format=csv&gid={SHEET_GID}"
+)
+
+# Nombres de columnas (deben coincidir exactamente con la fila 1 del Sheet)
 COL_SUSTANCIA = "SUSTANCIA/QUÍMICO"
 COL_FAMILIA   = "FAMILIA"
 COL_FECHA     = "FECHA"
 COL_VIGENCIA  = "VIGENCIA"
-COL_URL       = "URL a Ficha de seguridad"   # ← nombre real en el Sheet
-COL_PICTO     = "PICTOGRAMA"                 # URL de imagen si existe
+COL_URL       = "URL a Ficha de seguridad"
+COL_PICTO     = "PICTOGRAMA"
 
 @st.cache_data(ttl=600, show_spinner="Cargando fichas de seguridad…")
-def cargar_datos(url: str) -> pd.DataFrame:
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    df = conn.read(spreadsheet=url, usecols=list(range(6)), ttl=600)
-    df.columns = [c.strip() for c in df.columns]   # limpiar espacios
-    # Normalizar vigencia
+def cargar_datos(csv_url: str) -> pd.DataFrame:
+    df = pd.read_csv(csv_url)
+    df.columns = [c.strip() for c in df.columns]          # quitar espacios extras
+    # Asegurar que exista la columna de pictograma aunque esté vacía
+    if COL_PICTO not in df.columns:
+        df[COL_PICTO] = None
+    # Normalizar campos clave
     df[COL_VIGENCIA] = df[COL_VIGENCIA].fillna("").str.strip().str.upper()
-    # Normalizar familia
-    df[COL_FAMILIA] = df[COL_FAMILIA].fillna("SIN FAMILIA").str.strip().str.upper()
+    df[COL_FAMILIA]  = df[COL_FAMILIA].fillna("SIN FAMILIA").str.strip().str.upper()
     return df
 
 try:
-    df = cargar_datos(URL_SHEET)
+    df = cargar_datos(CSV_URL)
 except Exception as e:
     st.error(
-        "❌ No se pudo conectar con Google Sheets. "
-        "Verifica que el enlace sea público y que `st.secrets` tenga las credenciales correctas."
+        "❌ No se pudo leer el Google Sheet. "
+        "Verifica que: (1) el SHEET_ID sea correcto, "
+        "(2) el Sheet esté compartido como público (Lector)."
     )
     st.exception(e)
     st.stop()
