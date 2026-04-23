@@ -84,7 +84,7 @@ SHEET_GID = "0"                                     # pestaña 0 = primera hoja
 # URL de exportación CSV directa — no necesita credenciales
 CSV_URL = (
     f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
-    f"/export?format=csv&gid={SHEET_GID}"
+    f"1I06rgXcy1ACk50ApIGDVne8UbLFLClRe5wkWKT5KGAQ/edit?usp=sharing={SHEET_GID}"
 )
 
 # Nombres de columnas (deben coincidir exactamente con la fila 1 del Sheet)
