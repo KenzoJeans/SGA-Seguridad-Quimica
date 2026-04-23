@@ -17,7 +17,7 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────
-# ESTILOS
+# ESTILOS LIGEROS
 # ─────────────────────────────────────────────
 st.markdown(
     """
@@ -45,80 +45,133 @@ COL_PICTO     = "PICTOGRAMA"
 EXPECTED_HEADERS = [COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_URL, COL_PICTO]
 
 # ─────────────────────────────────────────────
-# UTILIDADES: normalización y descarga
+# UTILIDADES: Google Sheets y descarga CSV
 # ─────────────────────────────────────────────
-def normalize_drive_variants(url: str) -> List[str]:
-    """
-    Genera variantes de URL para Google Drive y devuelve lista de URLs candidatas.
-    """
-    if not isinstance(url, str) or not url.strip():
-        return []
-    u = url.strip()
-    candidates = [u]
+def parse_sheet_url(url: str) -> Tuple[Optional[str], str]:
+    if not url or not isinstance(url, str):
+        return None, "0"
+    s = url.strip()
+    m = re.search(r"/d/([a-zA-Z0-9-_]+)", s)
+    sheet_id = m.group(1) if m else None
+    if not sheet_id and re.fullmatch(r"[a-zA-Z0-9-_]+", s):
+        sheet_id = s
+    m_gid = re.search(r"[?&]gid=(\d+)", s) or re.search(r"#gid=(\d+)", s)
+    gid = m_gid.group(1) if m_gid else "0"
+    return sheet_id, gid
 
-    # si contiene /d/FILE_ID/
-    m = re.search(r"/d/([a-zA-Z0-9_-]+)", u)
-    if m:
-        fid = m.group(1)
-        candidates += [
-            f"https://drive.google.com/uc?export=view&id={fid}",
-            f"https://drive.google.com/uc?export=download&id={fid}",
-            f"https://drive.google.com/thumbnail?id={fid}",
-        ]
+def build_csv_urls(sheet_id: str, gid: str = "0") -> List[str]:
+    urls = []
+    if not sheet_id:
+        return urls
+    urls.append(f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}")
+    urls.append(f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid={gid}")
+    urls.append(f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv")
+    return urls
 
-    # open?id=FILE_ID
-    m2 = re.search(r"open\?id=([a-zA-Z0-9_-]+)", u)
-    if m2:
-        fid = m2.group(1)
-        candidates += [
-            f"https://drive.google.com/uc?export=view&id={fid}",
-            f"https://drive.google.com/uc?export=download&id={fid}",
-        ]
-
-    # share link with id= in query
-    m3 = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", u)
-    if m3:
-        fid = m3.group(1)
-        candidates += [
-            f"https://drive.google.com/uc?export=view&id={fid}",
-            f"https://drive.google.com/uc?export=download&id={fid}",
-        ]
-
-    # eliminar duplicados manteniendo orden
-    seen = set()
-    out = []
-    for c in candidates:
-        if c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
-
-def is_image_content_type(content_type: Optional[str]) -> bool:
-    if not content_type:
-        return False
-    return content_type.lower().startswith("image/")
-
-def try_fetch_image_bytes(url: str, timeout: int = 8) -> Tuple[Optional[bytes], Optional[int], Optional[str]]:
-    """
-    Intenta descargar la URL y devuelve (bytes or None, status_code or None, content_type or None).
-    """
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; SGA-App/1.0)"}
-    try:
-        resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
-        status = resp.status_code
-        ctype = resp.headers.get("Content-Type", "")
-        if resp.ok and is_image_content_type(ctype):
-            return resp.content, status, ctype
-        # si no es imagen, devolver None pero con status y ctype para diagnóstico
-        return None, status, ctype
-    except requests.RequestException as e:
-        return None, None, str(e)
+def try_download_csv(urls, timeout=15):
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; SGA-App/1.0)", "Accept": "text/csv, */*; q=0.1"}
+    last_err = None
+    for u in urls:
+        try:
+            resp = requests.get(u, headers=headers, timeout=timeout, allow_redirects=True)
+            resp.raise_for_status()
+            text = resp.text
+            if text.strip().lower().startswith("<!doctype html") or ("login" in text.lower() and "google" in text.lower()):
+                last_err = f"Respuesta no es CSV válida desde {u}"
+                continue
+            return text, None
+        except requests.HTTPError as he:
+            code = he.response.status_code if he.response is not None else "HTTPError"
+            last_err = f"HTTP {code} desde {u}"
+        except Exception as e:
+            last_err = f"Error descargando {u}: {e}"
+    return None, last_err
 
 # ─────────────────────────────────────────────
-# LECTURA Y NORMALIZACIÓN DE DATOS (simplificada)
+# DETECCIÓN DE ENCABEZADO ROBUSTA
+# ─────────────────────────────────────────────
+def find_header_row(df: pd.DataFrame, expected_tokens=EXPECTED_HEADERS, search_rows: int = 30) -> Optional[int]:
+    df_str = df.fillna("").astype(str)
+    expected_lower = [t.lower() for t in expected_tokens]
+    max_rows = min(search_rows, len(df_str))
+    for i in range(max_rows):
+        row = df_str.iloc[i].astype(str).str.lower().tolist()
+        count = 0
+        for token in expected_lower:
+            for cell in row:
+                if token in cell:
+                    count += 1
+                    break
+        if count >= 2:
+            return i
+    for i in range(max_rows):
+        row = df_str.iloc[i].astype(str).str.lower().tolist()
+        if any("sustancia" in c or "químico" in c or "quimico" in c for c in row):
+            return i
+    return None
+
+def read_with_detected_header_from_csv_text(csv_text: str) -> pd.DataFrame:
+    raw = pd.read_csv(io.StringIO(csv_text), header=None, dtype=str)
+    header_idx = find_header_row(raw, EXPECTED_HEADERS, search_rows=30)
+    if header_idx is not None:
+        header = raw.iloc[header_idx].astype(str).tolist()
+        df = raw.iloc[header_idx + 1 :].copy().reset_index(drop=True)
+        df.columns = [str(h).strip() if str(h).strip() != "" else f"col_{i}" for i, h in enumerate(header)]
+    else:
+        try:
+            df = pd.read_csv(io.StringIO(csv_text), header=0, dtype=str)
+        except Exception:
+            df = raw.copy()
+            df.columns = [f"col_{i}" for i in range(df.shape[1])]
+    df = ensure_expected_columns(df)
+    return df
+
+def read_excel_with_detected_header(uploaded_file) -> pd.DataFrame:
+    raw = pd.read_excel(uploaded_file, header=None, dtype=str, engine="openpyxl")
+    header_idx = find_header_row(raw, EXPECTED_HEADERS, search_rows=30)
+    if header_idx is not None:
+        header = raw.iloc[header_idx].astype(str).tolist()
+        df = raw.iloc[header_idx + 1 :].copy().reset_index(drop=True)
+        df.columns = [str(h).strip() if str(h).strip() != "" else f"col_{i}" for i, h in enumerate(header)]
+    else:
+        uploaded_file.seek(0)
+        try:
+            df = pd.read_excel(uploaded_file, header=0, dtype=str, engine="openpyxl")
+        except Exception:
+            df = raw.copy()
+            df.columns = [f"col_{i}" for i in range(df.shape[1])]
+    df = ensure_expected_columns(df)
+    return df
+
+# ─────────────────────────────────────────────
+# NORMALIZACIÓN DE VIGENCIA
+# ─────────────────────────────────────────────
+def normalize_vigencia(value) -> str:
+    if pd.isna(value):
+        return ""
+    s = str(value).strip().upper()
+    if s in ("", "N/A", "NA", "SIN DATO", "SIN_DATO", "ND"):
+        return ""
+    s_clean = re.sub(r"[^A-ZÑÁÉÍÓÚ0-9\s\-_/]", "", s)
+    s_clean = re.sub(r"[-_/]+", " ", s_clean).strip()
+    if "NO" in s_clean and ("VIGENT" in s_clean or "VIGEN" in s_clean or "VIGENCIA" in s_clean or "VIGENTE" in s_clean):
+        return "NO VIGENTE"
+    if "VIGENT" in s_clean or "VIGEN" in s_clean or "VIGENTE" in s_clean:
+        return "VIGENTE"
+    if s_clean.startswith("NO "):
+        return "NO VIGENTE"
+    if s_clean in ("SI", "S", "YES"):
+        return "VIGENTE"
+    if "VIG" in s_clean:
+        if "NO" in s_clean:
+            return "NO VIGENTE"
+        return "VIGENTE"
+    return ""
+
+# ─────────────────────────────────────────────
+# NORMALIZACIÓN DE COLUMNAS Y FECHAS
 # ─────────────────────────────────────────────
 def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # renombrar columnas si hay variantes
     cols_map = {}
     for c in df.columns:
         cl = str(c).strip().lower()
@@ -137,26 +190,23 @@ def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
     if cols_map:
         df = df.rename(columns=cols_map)
 
-    # asegurar columnas
     for col in EXPECTED_HEADERS:
         if col not in df.columns:
-            df[col] = ""
+            df[col] = pd.NA
 
-    # forzar strings para evitar booleanos
+    # Asegurar que todas las columnas sean strings para evitar conversiones a booleano
     for col in EXPECTED_HEADERS:
         df[col] = df[col].astype(str).fillna("").replace("nan", "")
 
-    # normalizar familia
-    df[COL_FAMILIA] = df[COL_FAMILIA].apply(lambda x: x.strip().upper() if x.strip() else "SIN FAMILIA")
+    # Familia: evitar booleanos y normalizar
+    df[COL_FAMILIA] = df[COL_FAMILIA].apply(lambda x: x.strip() if x and x.strip().upper() not in ("NAN", "NONE", "FALSE", "TRUE") else "")
+    df[COL_FAMILIA] = df[COL_FAMILIA].replace("", "SIN FAMILIA").str.upper()
 
-    # normalizar vigencia (simple)
-    df[COL_VIGENCIA] = df[COL_VIGENCIA].astype(str).str.strip().str.upper().replace({"N/A": "", "NONE": ""})
-
-    # fecha: si es número excel, convertir a dd/mm/YYYY
+    # Fecha: convertir seriales Excel y formatos comunes
     def fmt_fecha(v):
-        s = str(v).strip()
-        if not s or s.upper() in ("N/A", "NONE"):
+        if not v or str(v).strip().upper() in ("N/A", "SIN DATO", ""):
             return ""
+        s = str(v).strip()
         if re.match(r"^\d+(\.0+)?$", s):
             try:
                 num = int(float(s))
@@ -174,21 +224,83 @@ def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
         return s
 
     df[COL_FECHA] = df[COL_FECHA].apply(fmt_fecha)
+    df[COL_VIGENCIA] = df[COL_VIGENCIA].apply(normalize_vigencia)
+    df[COL_URL] = df[COL_URL].apply(lambda x: x.strip() if x and x.strip().lower() != "nan" else "")
+    df[COL_PICTO] = df[COL_PICTO].apply(lambda x: x.strip() if x and x.strip().lower() != "nan" else "")
     return df
+
+# ─────────────────────────────────────────────
+# NORMALIZAR ENLACES DE GOOGLE DRIVE (para mostrar imágenes)
+# ─────────────────────────────────────────────
+def normalize_drive_url(url: str) -> str:
+    if not isinstance(url, str):
+        return ""
+    u = url.strip()
+    if u == "":
+        return ""
+    m = re.search(r"/d/([a-zA-Z0-9_-]+)", u)
+    if m:
+        file_id = m.group(1)
+        return f"https://drive.google.com/uc?export=view&id={file_id}"
+    m2 = re.search(r"open\?id=([a-zA-Z0-9_-]+)", u)
+    if m2:
+        file_id = m2.group(1)
+        return f"https://drive.google.com/uc?export=view&id={file_id}"
+    m3 = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", u)
+    if m3:
+        file_id = m3.group(1)
+        return f"https://drive.google.com/uc?export=view&id={file_id}"
+    return u
+
+# ─────────────────────────────────────────────
+# LECTURA ROBUSTA DE FUENTE (Google Sheet o archivo subido)
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=600, show_spinner="Cargando fichas de seguridad…")
+def cargar_datos(sheet_input: Optional[str] = None, uploaded_file=None) -> pd.DataFrame:
+    if uploaded_file is not None:
+        filename = getattr(uploaded_file, "name", "").lower()
+        if filename.endswith((".xls", ".xlsx")):
+            uploaded_file.seek(0)
+            return read_excel_with_detected_header(uploaded_file)
+        else:
+            uploaded_file.seek(0)
+            try:
+                text = uploaded_file.getvalue().decode("utf-8")
+            except Exception:
+                uploaded_file.seek(0)
+                text = uploaded_file.getvalue().decode("latin-1")
+            return read_with_detected_header_from_csv_text(text)
+
+    if sheet_input:
+        sheet_id, gid = parse_sheet_url(sheet_input)
+        if not sheet_id:
+            raise ValueError("No se pudo extraer el ID del Google Sheet desde la entrada proporcionada.")
+        urls = build_csv_urls(sheet_id, gid)
+        if not urls:
+            raise ValueError("No se pudo construir una URL válida para descargar el CSV.")
+        csv_text, err = try_download_csv(urls, timeout=15)
+        if csv_text is None:
+            raise ConnectionError(f"No se pudo descargar CSV: {err}")
+        return read_with_detected_header_from_csv_text(csv_text)
+
+    raise ValueError("No se proporcionó archivo ni URL/ID del Google Sheet.")
 
 # ─────────────────────────────────────────────
 # INTERFAZ: entrada y subida
 # ─────────────────────────────────────────────
 st.title("Repositorio Hojas de Seguridad — SGA")
-st.caption("Sistema Globalmente Armonizado · Kenzo Jeans")
+st.caption("Sistema Globalmente Armonizado · Kenzo Jeans · Consulta rápida de fichas de seguridad químicas")
 st.divider()
 
 with st.sidebar:
-    st.header("Fuente de datos")
-    st.markdown("Pega la URL del Google Sheet o sube un archivo (XLSX/CSV).")
-    sheet_input = st.text_input("URL o ID del Google Sheet", value="")
+    st.header("🔎 Fuente de datos")
+    st.markdown("Pega la URL completa del Google Sheet o solo el ID. Si la descarga falla, sube el archivo (XLSX/CSV).")
+    sheet_input = st.text_input(
+        "URL o ID del Google Sheet",
+        value="https://docs.google.com/spreadsheets/d/1I06rgXcy1ACk50ApIGDVne8UbLFLClRe5wkWKT5KGAQ/edit?usp=sharing",
+    )
+    st.markdown("---")
     uploaded_file = st.file_uploader("Subir XLSX o CSV (opcional)", type=["xlsx", "xls", "csv"])
-    debug = st.checkbox("Mostrar diagnóstico de pictogramas", value=False)
     if st.button("🔄 Recargar datos"):
         try:
             st.cache_data.clear()
@@ -197,106 +309,67 @@ with st.sidebar:
         st.rerun()
 
 # ─────────────────────────────────────────────
-# CARGAR DATOS: prioriza archivo subido
+# CARGAR DATOS
 # ─────────────────────────────────────────────
-def load_df_from_uploaded(uploaded) -> pd.DataFrame:
-    name = getattr(uploaded, "name", "").lower()
-    if name.endswith((".xls", ".xlsx")):
-        uploaded.seek(0)
-        df = pd.read_excel(uploaded, dtype=str, engine="openpyxl")
-    else:
-        uploaded.seek(0)
-        try:
-            text = uploaded.getvalue().decode("utf-8")
-        except Exception:
-            text = uploaded.getvalue().decode("latin-1")
-        df = pd.read_csv(io.StringIO(text), dtype=str)
-    return df
-
-def load_df_from_sheet_url(sheet_url: str) -> pd.DataFrame:
-    # extraer id si es posible
-    m = re.search(r"/d/([a-zA-Z0-9-_]+)", sheet_url)
-    sheet_id = m.group(1) if m else (sheet_url if re.fullmatch(r"[a-zA-Z0-9-_]+", sheet_url) else None)
-    if not sheet_id:
-        raise ValueError("No se pudo extraer ID del Google Sheet.")
-    gid = "0"
-    m_gid = re.search(r"[?&]gid=(\d+)", sheet_url) or re.search(r"#gid=(\d+)", sheet_url)
-    if m_gid:
-        gid = m_gid.group(1)
-    urls = [
-        f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}",
-        f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid={gid}",
-    ]
-    # intentar descargar
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; SGA-App/1.0)"}
-    last_err = None
-    for u in urls:
-        try:
-            resp = requests.get(u, headers=headers, timeout=15)
-            resp.raise_for_status()
-            text = resp.text
-            # si devuelve HTML, fallar
-            if text.strip().lower().startswith("<!doctype html"):
-                last_err = f"Respuesta HTML desde {u}"
-                continue
-            df = pd.read_csv(io.StringIO(text), dtype=str, header=0)
-            return df
-        except Exception as e:
-            last_err = str(e)
-    raise ConnectionError(f"No se pudo descargar CSV: {last_err}")
-
-# cargar df
 try:
-    if uploaded_file is not None:
-        df = load_df_from_uploaded(uploaded_file)
-    elif sheet_input:
-        df = load_df_from_sheet_url(sheet_input)
-    else:
-        st.info("Sube un archivo o pega la URL del Google Sheet para cargar datos.")
-        st.stop()
+    df = cargar_datos(sheet_input if sheet_input else None, uploaded_file)
 except Exception as e:
-    st.error("Error cargando datos: " + str(e))
+    st.error(
+        "❌ No se pudo leer la fuente de datos. Verifica:\n"
+        "1) La URL/ID es correcta.\n"
+        "2) El Sheet esté compartido como 'Cualquier persona con el enlace → Lector'.\n"
+        "3) Si subes un archivo, que sea XLSX/CSV válido."
+    )
+    st.exception(e)
     st.stop()
 
-# normalizar columnas y valores
-df.columns = [str(c).strip() for c in df.columns]
+# ─────────────────────────────────────────────
+# Normalizar pictograma Drive y columnas finales
+# ─────────────────────────────────────────────
+df.columns = [c.strip() for c in df.columns]
+for col in EXPECTED_HEADERS:
+    if col not in df.columns:
+        df[col] = pd.NA
+
+# Normalizar pictograma URLs (soporta enlaces de Drive)
+df[COL_PICTO] = df[COL_PICTO].fillna("").astype(str).apply(normalize_drive_url)
 df = ensure_expected_columns(df)
 
-# normalizar pictograma URLs (variantes de Drive)
-df[COL_PICTO] = df[COL_PICTO].fillna("").astype(str).apply(lambda u: u.strip())
-
 # ─────────────────────────────────────────────
-# DIAGNÓSTICO: mostrar URLs y estado si el usuario lo activa
+# DEBUG OPCIONAL: mostrar primeras filas y URLs de pictogramas
 # ─────────────────────────────────────────────
+debug = st.sidebar.checkbox("Mostrar diagnóstico (URLs pictograma y primeras filas)", value=False)
 if debug:
     st.sidebar.markdown("**Primeras filas (normalizadas)**")
     st.sidebar.dataframe(df[[COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_PICTO]].head(20))
-    st.sidebar.markdown("**Comprobación rápida de URLs de pictograma (primeras 10 no vacías)**")
-    sample_urls = [u for u in df[COL_PICTO].unique().tolist() if u][:10]
+    st.sidebar.markdown("**Ejemplo de URLs de pictograma**")
+    sample_urls = df[COL_PICTO].dropna().unique().tolist()[:10]
     for u in sample_urls:
-        st.sidebar.markdown(f"- {u}")
-        # probar variantes de Drive
-        variants = normalize_drive_variants(u)
-        for v in variants:
-            img_bytes, status, ctype = try_fetch_image_bytes(v, timeout=6)
-            st.sidebar.markdown(f"  - {v} → status: {status} ; content-type: {ctype} ; image_ok: {bool(img_bytes)}")
+        st.sidebar.text(u)
 
 # ─────────────────────────────────────────────
 # SIDEBAR: filtros y métricas
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.header("Filtros")
-    busqueda = st.text_input("Buscar sustancia", placeholder="Ej: ÁCIDO OXÁLICO")
+    st.header("🔎 Filtros")
+    busqueda = st.text_input("Buscar sustancia", placeholder="Ej: ÁCIDO OXÁLICO, SODA…")
     familias_disponibles = sorted(df[COL_FAMILIA].replace("", "SIN FAMILIA").unique().tolist())
     familias_sel = st.multiselect("Familia / categoría", options=familias_disponibles, default=[])
     estado_sel = st.radio("Estado de vigencia", options=["Todos", "✅ Vigentes", "⚠️ No vigentes"], index=0)
+    st.divider()
+    total = len(df)
+    vigentes = (df[COL_VIGENCIA] == "VIGENTE").sum()
+    novigentes = total - vigentes
+    st.markdown(f"**📦 Total fichas:** {total}")
+    st.markdown(f"**✅ Vigentes:** {vigentes}")
+    st.markdown(f"**⚠️ No vigentes:** {novigentes}")
 
 # ─────────────────────────────────────────────
 # APLICAR FILTROS
 # ─────────────────────────────────────────────
 df_filtrado = df.copy()
 if busqueda and busqueda.strip():
-    df_filtrado = df_filtrado[df_filtrado[COL_SUSTANCIA].str.contains(busqueda.strip(), case=False, na=False)]
+    df_filtrado = df_filtrado[df_filtrado[COL_SUSTANCIA].astype(str).str.contains(busqueda.strip(), case=False, na=False)]
 if familias_sel:
     df_filtrado = df_filtrado[df_filtrado[COL_FAMILIA].isin(familias_sel)]
 if estado_sel == "✅ Vigentes":
@@ -305,7 +378,7 @@ elif estado_sel == "⚠️ No vigentes":
     df_filtrado = df_filtrado[df_filtrado[COL_VIGENCIA] != "VIGENTE"]
 
 # ─────────────────────────────────────────────
-# RESULTADOS: mostrar Nombre y detalles; mostrar pictograma con varios intentos
+# RESULTADOS: mostrar Nombre como título y detalles debajo
 # ─────────────────────────────────────────────
 n = len(df_filtrado)
 if n == 0:
@@ -316,12 +389,12 @@ st.markdown(f"**{n} ficha{'s' if n != 1 else ''} encontrada{'s' if n != 1 else '
 st.caption("Haz clic en la tarjeta para ver el detalle completo.")
 
 for _, row in df_filtrado.iterrows():
-    nombre = str(row.get(COL_SUSTANCIA, "")).strip() or "—"
+    nombre = str(row.get(COL_SUSTANCIA, "—")).strip() or "—"
     familia = str(row.get(COL_FAMILIA, "SIN FAMILIA")).strip() or "SIN FAMILIA"
     fecha = str(row.get(COL_FECHA, "")).strip() or "Sin fecha"
     vigencia = str(row.get(COL_VIGENCIA, "")).strip().upper() or "SIN DATO"
     url_doc = str(row.get(COL_URL, "")).strip()
-    url_picto_raw = str(row.get(COL_PICTO, "")).strip()
+    url_picto = str(row.get(COL_PICTO, "")).strip()
 
     es_vigente = vigencia == "VIGENTE"
     badge_cls = "badge-vigente" if es_vigente else "badge-novigente"
@@ -332,36 +405,27 @@ for _, row in df_filtrado.iterrows():
         st.markdown(f"**🏭 Familia / Categoría:** {familia}")
         st.markdown(f"**📅 Última revisión:** {fecha}")
         st.markdown(f"**📄 Vigencia:** <span class=\"{badge_cls}\">{badge_txt}</span>", unsafe_allow_html=True)
+
         st.write("")
 
-        # Mostrar pictograma: probar variantes de Drive y fallback a descarga de bytes
-        shown = False
-        if url_picto_raw:
-            variants = normalize_drive_variants(url_picto_raw)
-            # añadir la URL original al final si no está
-            if url_picto_raw not in variants:
-                variants.append(url_picto_raw)
-            for v in variants:
-                # 1) intentar st.image(v) directo (rápido)
-                try:
-                    st.image(v, caption="Pictograma SGA", width=120)
-                    shown = True
-                    break
-                except Exception:
-                    # 2) intentar descargar bytes y mostrar
-                    img_bytes, status, ctype = try_fetch_image_bytes(v, timeout=6)
-                    if img_bytes:
-                        try:
-                            st.image(img_bytes, caption="Pictograma SGA", width=120)
-                            shown = True
-                            break
-                        except Exception:
-                            shown = False
-                    # si no hay bytes, continuar con la siguiente variante
+        # Mostrar pictograma: primero intentar con st.image(url), si falla, descargar bytes y mostrar
+        if url_picto and url_picto.lower().startswith("http"):
+            shown = False
+            try:
+                st.image(url_picto, caption="Pictograma SGA", width=120)
+                shown = True
+            except Exception:
+                shown = False
             if not shown:
-                st.write("⚗️ Pictograma no disponible. Posibles causas: enlace no público, Google Drive requiere autenticación, o la URL no apunta a una imagen.")
-                if debug:
-                    st.write("Variantes probadas:", variants)
+                try:
+                    resp = requests.get(url_picto, timeout=8)
+                    resp.raise_for_status()
+                    st.image(resp.content, caption="Pictograma SGA", width=120)
+                    shown = True
+                except Exception:
+                    shown = False
+            if not shown:
+                st.write("⚗️ Pictograma no disponible")
         else:
             st.markdown(
                 "<div style='width:90px;height:90px;border:3px solid #e53935;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:2.2em;background:#fff3e0;'>⚗️</div>",
@@ -369,6 +433,7 @@ for _, row in df_filtrado.iterrows():
             )
 
         st.write("")
+
         if url_doc and url_doc.lower().startswith("http"):
             st.markdown(f"[📂 Abrir ficha de seguridad]({url_doc})")
         else:
