@@ -1,3 +1,4 @@
+# app_sga_streamlit.py
 import re
 import io
 import requests
@@ -15,88 +16,18 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────
-# ESTILOS PERSONALIZADOS
+# ESTILOS (resumido)
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
-    :root {
-        --verde:   #2e7d32;
-        --rojo:    #c62828;
-        --amarillo:#f57f17;
-        --gris:    #455a64;
-    }
-    h1 { color: #1a237e !important; letter-spacing: -0.5px; }
-    .badge-vigente {
-        background: #e8f5e9; color: #2e7d32;
-        border: 1.5px solid #2e7d32;
-        border-radius: 20px; padding: 2px 12px;
-        font-weight: 700; font-size: 0.78em;
-    }
-    .badge-novigente {
-        background: #ffebee; color: #c62828;
-        border: 1.5px solid #c62828;
-        border-radius: 20px; padding: 2px 12px;
-        font-weight: 700; font-size: 0.78em;
-    }
-    .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
-    .info-item { font-size: 0.9em; color: #37474f; }
-    .info-label { font-weight: 600; color: #263238; }
-    .sidebar-metric { font-size: 0.85em; color: #546e7a; margin-bottom: 2px; }
-    details summary { font-size: 1.02em !important; font-weight: 600; }
+h1 { color: #1a237e !important; }
+.badge-vigente { background:#e8f5e9; color:#2e7d32; border-radius:20px; padding:4px 10px; font-weight:700; }
+.badge-novigente { background:#ffebee; color:#c62828; border-radius:20px; padding:4px 10px; font-weight:700; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# TÍTULO
-# ─────────────────────────────────────────────
-col_logo, col_title = st.columns([1, 9])
-with col_logo:
-    st.markdown("## 🛡️")
-with col_title:
-    st.title("Repositorio Hojas de Seguridad — SGA")
-    st.caption("Sistema Globalmente Armonizado · Kenzo Jeans · Consulta rápida de fichas de seguridad químicas")
-
-st.divider()
-
-# ─────────────────────────────────────────────
-# CONFIGURACIÓN DEL GOOGLE SHEET (entrada flexible)
-# ─────────────────────────────────────────────
-# Puedes pegar aquí la URL completa del Google Sheet compartido (la que proporcionaste).
-# Ejemplo:
-# https://docs.google.com/spreadsheets/d/1I06rgXcy1ACk50ApIGDVne8UbLFLClRe5wkWKT5KGAQ/edit?usp=sharing
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1I06rgXcy1ACk50ApIGDVne8UbLFLClRe5wkWKT5KGAQ/edit?usp=sharing"
-
-# ─────────────────────────────────────────────
-# UTILIDADES: extraer ID y GID de distintas variantes de URL
-# ─────────────────────────────────────────────
-def parse_sheet_url(url: str):
-    """
-    Extrae sheet_id y gid desde una URL de Google Sheets.
-    Devuelve (sheet_id, gid). Si no encuentra gid, devuelve '0'.
-    """
-    if not isinstance(url, str) or url.strip() == "":
-        return None, None
-
-    # Buscar ID entre /d/ y / (edit o view)
-    m = re.search(r"/d/([a-zA-Z0-9-_]+)", url)
-    sheet_id = m.group(1) if m else None
-
-    # Buscar gid en query string o en fragmento
-    m_gid = re.search(r"[?&]gid=(\d+)", url)
-    if not m_gid:
-        m_gid = re.search(r"#gid=(\d+)", url)
-    gid = m_gid.group(1) if m_gid else "0"
-
-    return sheet_id, gid
-
-def build_csv_export_url(sheet_id: str, gid: str = "0") -> str:
-    """
-    Construye la URL de exportación CSV para Google Sheets.
-    """
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-
-# ─────────────────────────────────────────────
-# Nombres de columnas esperadas
+# CONSTANTES: nombres de columnas esperadas
 # ─────────────────────────────────────────────
 COL_SUSTANCIA = "SUSTANCIA/QUÍMICO"
 COL_FAMILIA   = "FAMILIA"
@@ -106,55 +37,101 @@ COL_URL       = "URL a Ficha de seguridad"
 COL_PICTO     = "PICTOGRAMA"
 
 # ─────────────────────────────────────────────
-# CARGA DE DATOS: usa requests para mayor control y manejo de errores
+# UTILIDADES: parseo de URL/ID y construcción de URLs CSV
 # ─────────────────────────────────────────────
-@st.cache_data(ttl=600, show_spinner="Cargando fichas de seguridad…")
-def cargar_datos(sheet_url: str) -> pd.DataFrame:
-    sheet_id, gid = parse_sheet_url(sheet_url)
+def parse_sheet_url(url: str):
+    """Extrae sheet_id y gid desde una URL de Google Sheets o devuelve (id, '0') si se pasa solo el id."""
+    if not url or not isinstance(url, str):
+        return None, None
+    s = url.strip()
+    # Extraer ID entre /d/ y siguiente /
+    m = re.search(r"/d/([a-zA-Z0-9-_]+)", s)
+    sheet_id = m.group(1) if m else None
+    # Si no hay /d/ quizá el usuario pegó solo el ID
+    if not sheet_id and re.fullmatch(r"[a-zA-Z0-9-_]+", s):
+        sheet_id = s
+    # Extraer gid si existe
+    m_gid = re.search(r"[?&]gid=(\d+)", s) or re.search(r"#gid=(\d+)", s)
+    gid = m_gid.group(1) if m_gid else "0"
+    return sheet_id, gid
+
+def build_candidate_csv_urls(sheet_id: str, gid: str = "0"):
+    """Genera varias variantes de URL para intentar descargar CSV desde Google Sheets."""
+    urls = []
     if not sheet_id:
-        raise ValueError("No se pudo extraer el ID del Google Sheet desde la URL proporcionada.")
+        return urls
+    urls.append(f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}")
+    urls.append(f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid={gid}")
+    urls.append(f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv")
+    return urls
 
-    csv_url = build_csv_export_url(sheet_id, gid)
-
-    # Hacer la petición con headers para evitar bloqueos por user-agent
+def try_download_csv(urls, timeout=15):
+    """Intenta descargar el CSV probando varias URLs; devuelve (text, error_msg)."""
+    last_err = None
     headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; SGA-App/1.0; +https://example.com)",
+        "User-Agent": "Mozilla/5.0 (compatible; SGA-App/1.0)",
         "Accept": "text/csv, */*; q=0.1",
     }
+    for u in urls:
+        try:
+            resp = requests.get(u, headers=headers, timeout=timeout, allow_redirects=True)
+            resp.raise_for_status()
+            text = resp.text
+            # detectar si Google devolvió HTML (página de login o error)
+            if text.strip().lower().startswith("<!doctype html") or ("login" in text.lower() and "google" in text.lower()):
+                last_err = f"Respuesta no es CSV válida desde {u}"
+                continue
+            return text, None
+        except requests.HTTPError as he:
+            code = he.response.status_code if he.response is not None else "HTTPError"
+            last_err = f"HTTP {code} desde {u}"
+        except Exception as e:
+            last_err = f"Error descargando {u}: {e}"
+    return None, last_err
 
+# ─────────────────────────────────────────────
+# CARGA Y NORMALIZACIÓN DE DATOS
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=600, show_spinner="Cargando fichas de seguridad…")
+def cargar_datos_from_sheet_input(sheet_input: str, uploaded_csv_text: str | None = None) -> pd.DataFrame:
+    """
+    sheet_input: puede ser URL completa o solo el sheet_id.
+    uploaded_csv_text: si el usuario subió un CSV, se prioriza.
+    """
+    csv_text = None
+    download_error = None
+
+    # Priorizar archivo subido (texto CSV ya decodificado)
+    if uploaded_csv_text:
+        csv_text = uploaded_csv_text
+    else:
+        # Intentar parsear sheet_input y descargar
+        sheet_id, gid = parse_sheet_url(sheet_input or "")
+        if not sheet_id:
+            raise ValueError("No se pudo extraer el ID del Google Sheet desde la entrada proporcionada.")
+        urls = build_candidate_csv_urls(sheet_id, gid)
+        if not urls:
+            raise ValueError("No se pudo construir una URL válida para descargar el CSV.")
+        csv_text, download_error = try_download_csv(urls, timeout=15)
+        if csv_text is None:
+            raise ConnectionError(f"No se pudo descargar CSV: {download_error}")
+
+    # Parsear CSV con pandas
     try:
-        resp = requests.get(csv_url, headers=headers, timeout=15, allow_redirects=True)
-    except requests.RequestException as e:
-        raise ConnectionError(f"Error de conexión al intentar descargar el CSV: {e}")
-
-    # Si Google devuelve redirección a página de login o error, mostrar detalle
-    if resp.status_code != 200:
-        # Incluir fragmento del contenido para diagnóstico (sin exponer todo)
-        snippet = resp.text[:500].replace("\n", " ")
-        raise ConnectionError(
-            f"Respuesta inesperada al solicitar el CSV (HTTP {resp.status_code}). "
-            f"Contenido: {snippet}"
-        )
-
-    # Leer CSV desde el texto recibido
-    try:
-        df = pd.read_csv(io.StringIO(resp.text))
+        df = pd.read_csv(io.StringIO(csv_text))
     except Exception as e:
-        # Si pandas no puede parsear, mostrar un fragmento para diagnóstico
-        snippet = resp.text[:1000].replace("\n", " ")
+        snippet = (csv_text or "")[:1000].replace("\n", " ")
         raise ValueError(f"El contenido descargado no parece ser un CSV válido. Fragmento: {snippet}") from e
 
-    # Normalizar nombres de columnas (quitar espacios)
+    # Normalizar nombres de columnas
     df.columns = [c.strip() for c in df.columns]
 
-    # Asegurar que existan las columnas esperadas; si faltan, crearlas vacías
+    # Asegurar existencia de columnas esperadas para evitar KeyError
     expected_cols = [COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_URL, COL_PICTO]
     for col in expected_cols:
         if col not in df.columns:
-            if col == COL_VIGENCIA:
-                df[col] = ""
-            else:
-                df[col] = pd.NA
+            # VIGENCIA la dejamos como cadena vacía por defecto
+            df[col] = "" if col == COL_VIGENCIA else pd.NA
 
     # Normalizaciones seguras
     df[COL_VIGENCIA] = df[COL_VIGENCIA].fillna("").astype(str).str.strip().str.upper()
@@ -166,58 +143,18 @@ def cargar_datos(sheet_url: str) -> pd.DataFrame:
     return df
 
 # ─────────────────────────────────────────────
-# Intentar cargar datos y manejar errores con mensajes útiles
+# INTERFAZ: entrada de URL/ID y subida de CSV (fallback)
 # ─────────────────────────────────────────────
-try:
-    df = cargar_datos(SHEET_URL)
-except Exception as e:
-    st.error(
-        "❌ No se pudo leer el Google Sheet. Verifica lo siguiente:\n\n"
-        "1) La URL que pegaste contiene el ID correcto del Sheet.\n"
-        "2) El Sheet está compartido como 'Cualquier persona con el enlace → Lector'.\n"
-        "3) Si usas una cuenta corporativa, puede que Google requiera autenticación; "
-        "en ese caso publica la hoja o usa una cuenta con acceso público.\n\n"
-        "Detalle técnico (útil para diagnóstico):"
-    )
-    st.exception(e)
-    st.stop()
+st.title("Repositorio Hojas de Seguridad — SGA")
+st.caption("Sistema Globalmente Armonizado · Kenzo Jeans · Consulta rápida de fichas de seguridad químicas")
+st.divider()
 
-# ─────────────────────────────────────────────
-# SIDEBAR – FILTROS
-# ─────────────────────────────────────────────
 with st.sidebar:
-    st.header("🔎 Filtros")
-
-    busqueda = st.text_input(
-        "Buscar sustancia",
-        placeholder="Ej: ÁCIDO OXÁLICO, SODA…",
-        help="Búsqueda parcial, sin importar mayúsculas.",
-    )
-
-    familias_disponibles = sorted(df[COL_FAMILIA].replace("", "SIN FAMILIA").unique().tolist())
-    familias_sel = st.multiselect(
-        "Familia / categoría",
-        options=familias_disponibles,
-        default=[],
-        placeholder="Todas las familias",
-    )
-
-    estado_sel = st.radio(
-        "Estado de vigencia",
-        options=["Todos", "✅ Vigentes", "⚠️ No vigentes"],
-        index=0,
-    )
-
-    st.divider()
-
-    total      = len(df)
-    vigentes   = (df[COL_VIGENCIA] == "VIGENTE").sum()
-    novigentes = total - vigentes
-    st.markdown(f"**📦 Total fichas:** {total}")
-    st.markdown(f"**✅ Vigentes:** {vigentes}")
-    st.markdown(f"**⚠️ No vigentes:** {novigentes}")
-
-    st.divider()
+    st.header("🔎 Fuente de datos (Google Sheets)")
+    st.markdown("Pega la URL completa del Google Sheet o solo el ID. Si la descarga falla, sube el CSV manualmente.")
+    sheet_input = st.text_input("URL o ID del Google Sheet", value="https://docs.google.com/spreadsheets/d/1I06rgXcy1ACk50ApIGDVne8UbLFLClRe5wkWKT5KGAQ/edit?usp=sharing")
+    st.markdown("---")
+    uploaded_file = st.file_uploader("Subir CSV exportado (opcional)", type=["csv"])
     if st.button("🔄 Recargar datos"):
         try:
             st.cache_data.clear()
@@ -225,14 +162,55 @@ with st.sidebar:
             pass
         st.experimental_rerun()
 
+# Decodificar archivo subido si existe
+uploaded_csv_text = None
+if uploaded_file is not None:
+    try:
+        uploaded_csv_text = uploaded_file.getvalue().decode("utf-8")
+    except Exception:
+        try:
+            uploaded_csv_text = uploaded_file.getvalue().decode("latin-1")
+        except Exception as e:
+            st.error(f"No se pudo leer el archivo subido: {e}")
+            st.stop()
+
+# Intentar cargar datos
+try:
+    df = cargar_datos_from_sheet_input(sheet_input, uploaded_csv_text)
+except Exception as e:
+    st.error(
+        "❌ No se pudo leer el Google Sheet. Verifica:\n"
+        "1) La URL/ID es correcta.\n"
+        "2) El Sheet está compartido como 'Cualquier persona con el enlace → Lector'.\n"
+        "3) Si tu organización requiere autenticación, publica la hoja o sube el CSV manualmente."
+    )
+    st.exception(e)
+    st.stop()
+
+# ─────────────────────────────────────────────
+# SIDEBAR: filtros y métricas
+# ─────────────────────────────────────────────
+with st.sidebar:
+    st.header("🔎 Filtros")
+    busqueda = st.text_input("Buscar sustancia", placeholder="Ej: ÁCIDO OXÁLICO, SODA…")
+    familias_disponibles = sorted(df[COL_FAMILIA].replace("", "SIN FAMILIA").unique().tolist())
+    familias_sel = st.multiselect("Familia / categoría", options=familias_disponibles, default=[])
+    estado_sel = st.radio("Estado de vigencia", options=["Todos", "✅ Vigentes", "⚠️ No vigentes"], index=0)
+    st.divider()
+    total = len(df)
+    vigentes = (df[COL_VIGENCIA] == "VIGENTE").sum()
+    novigentes = total - vigentes
+    st.markdown(f"**📦 Total fichas:** {total}")
+    st.markdown(f"**✅ Vigentes:** {vigentes}")
+    st.markdown(f"**⚠️ No vigentes:** {novigentes}")
+
 # ─────────────────────────────────────────────
 # APLICAR FILTROS
 # ─────────────────────────────────────────────
 df_filtrado = df.copy()
 
 if busqueda and busqueda.strip():
-    mask = df_filtrado[COL_SUSTANCIA].astype(str).str.contains(busqueda.strip(), case=False, na=False)
-    df_filtrado = df_filtrado[mask]
+    df_filtrado = df_filtrado[df_filtrado[COL_SUSTANCIA].astype(str).str.contains(busqueda.strip(), case=False, na=False)]
 
 if familias_sel:
     df_filtrado = df_filtrado[df_filtrado[COL_FAMILIA].isin(familias_sel)]
@@ -243,7 +221,7 @@ elif estado_sel == "⚠️ No vigentes":
     df_filtrado = df_filtrado[df_filtrado[COL_VIGENCIA] != "VIGENTE"]
 
 # ─────────────────────────────────────────────
-# RESULTADOS – encabezado
+# RESULTADOS
 # ─────────────────────────────────────────────
 n = len(df_filtrado)
 if n == 0:
@@ -253,53 +231,41 @@ if n == 0:
 st.markdown(f"**{n} ficha{'s' if n != 1 else ''} encontrada{'s' if n != 1 else ''}**")
 st.caption("Haz clic en el nombre de la sustancia para ver el detalle completo.")
 
-# ─────────────────────────────────────────────
-# TARJETAS EXPANDIBLES
-# ─────────────────────────────────────────────
 for _, row in df_filtrado.iterrows():
     sustancia = str(row.get(COL_SUSTANCIA, "—")).strip() or "—"
-    familia   = str(row.get(COL_FAMILIA,   "—")).strip() or "—"
-    fecha     = row.get(COL_FECHA, None)
-    vigencia  = str(row.get(COL_VIGENCIA,  "")).strip().upper()
-    url_doc   = row.get(COL_URL,  "")
+    familia = str(row.get(COL_FAMILIA, "—")).strip() or "—"
+    fecha = row.get(COL_FECHA, None)
+    vigencia = str(row.get(COL_VIGENCIA, "")).strip().upper()
+    url_doc = row.get(COL_URL, "")
     url_picto = row.get(COL_PICTO, "")
 
     es_vigente = vigencia == "VIGENTE"
-    emoji_est  = "✅" if es_vigente else "⚠️"
-    badge_cls  = "badge-vigente" if es_vigente else "badge-novigente"
-    badge_txt  = vigencia if vigencia else "SIN DATO"
-    fecha_fmt  = str(fecha).strip() if pd.notna(fecha) and str(fecha).strip() not in ("", "nan") else "Sin fecha"
+    emoji_est = "✅" if es_vigente else "⚠️"
+    badge_cls = "badge-vigente" if es_vigente else "badge-novigente"
+    badge_txt = vigencia if vigencia else "SIN DATO"
+    fecha_fmt = str(fecha).strip() if pd.notna(fecha) and str(fecha).strip() not in ("", "nan") else "Sin fecha"
 
     expander_label = f"{emoji_est}  {sustancia}  ·  {familia}"
-
     with st.expander(expander_label, expanded=False):
         col_info, col_accion = st.columns([3, 2])
-
         with col_info:
             st.markdown(f'<span class="{badge_cls}">{badge_txt}</span>', unsafe_allow_html=True)
             st.write("")
             st.markdown(f"🏭 **Familia / Categoría:** {familia}")
             st.markdown(f"📅 **Última revisión:** {fecha_fmt}")
             st.markdown(f"📄 **Vigencia:** {badge_txt}")
-
         with col_accion:
-            tiene_picto = isinstance(url_picto, str) and url_picto.strip() != "" and url_picto.strip().startswith("http")
+            tiene_picto = isinstance(url_picto, str) and url_picto.strip().startswith("http")
             if tiene_picto:
-                st.image(url_picto.strip(), caption="Pictograma SGA", width=120)
+                try:
+                    st.image(url_picto.strip(), caption="Pictograma SGA", width=120)
+                except Exception:
+                    st.write("Pictograma no disponible")
             else:
-                st.markdown("""
-                <div style="
-                    width:90px; height:90px;
-                    border: 3px solid #e53935;
-                    border-radius: 8px;
-                    display:flex; align-items:center; justify-content:center;
-                    font-size:2.2em; background:#fff3e0;
-                ">⚗️</div>
-                """, unsafe_allow_html=True)
+                st.markdown("<div style='width:90px;height:90px;border:3px solid #e53935;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:2.2em;background:#fff3e0;'>⚗️</div>", unsafe_allow_html=True)
 
             st.write("")
-
-            tiene_url = isinstance(url_doc, str) and url_doc.strip() != "" and url_doc.strip().startswith("http")
+            tiene_url = isinstance(url_doc, str) and url_doc.strip().startswith("http")
             if tiene_url:
                 try:
                     st.link_button("📂 Abrir ficha de seguridad", url_doc.strip(), use_container_width=True)
@@ -313,12 +279,5 @@ for _, row in df_filtrado.iterrows():
 
     st.markdown("<hr style='margin:2px 0; border-color:#eceff1'>", unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────
-# PIE DE PÁGINA
-# ─────────────────────────────────────────────
 st.divider()
-st.caption(
-    "🛡️ **Kenzo Jeans – Gestión SGA** · "
-    "Los documentos se actualizan desde Google Sheets · "
-    "Para reportar un error contacta al área de SST."
-)
+st.caption("🛡️ Kenzo Jeans – Gestión SGA · Los documentos se actualizan desde Google Sheets")
