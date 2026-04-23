@@ -26,6 +26,7 @@ st.markdown(
 .detail-label { font-weight:700; color:#263238; }
 .badge-vigente { background:#e8f5e9; color:#2e7d32; border-radius:12px; padding:4px 10px; font-weight:700; }
 .badge-novigente { background:#ffebee; color:#c62828; border-radius:12px; padding:4px 10px; font-weight:700; }
+.debug { font-size:0.85rem; color:#666; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -44,7 +45,7 @@ COL_PICTO     = "PICTOGRAMA"
 EXPECTED_HEADERS = [COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_URL, COL_PICTO]
 
 # ─────────────────────────────────────────────
-# UTILIDADES: Google Sheets, descarga CSV
+# UTILIDADES: Google Sheets y descarga CSV
 # ─────────────────────────────────────────────
 def parse_sheet_url(url: str) -> Tuple[Optional[str], str]:
     if not url or not isinstance(url, str):
@@ -75,7 +76,6 @@ def try_download_csv(urls, timeout=15):
             resp = requests.get(u, headers=headers, timeout=timeout, allow_redirects=True)
             resp.raise_for_status()
             text = resp.text
-            # detectar si Google devolvió HTML (login / error)
             if text.strip().lower().startswith("<!doctype html") or ("login" in text.lower() and "google" in text.lower()):
                 last_err = f"Respuesta no es CSV válida desde {u}"
                 continue
@@ -104,7 +104,6 @@ def find_header_row(df: pd.DataFrame, expected_tokens=EXPECTED_HEADERS, search_r
                     break
         if count >= 2:
             return i
-    # fallback: buscar "sustancia" o "químico"
     for i in range(max_rows):
         row = df_str.iloc[i].astype(str).str.lower().tolist()
         if any("sustancia" in c or "químico" in c or "quimico" in c for c in row):
@@ -128,7 +127,7 @@ def read_with_detected_header_from_csv_text(csv_text: str) -> pd.DataFrame:
     return df
 
 def read_excel_with_detected_header(uploaded_file) -> pd.DataFrame:
-    raw = pd.read_excel(uploaded_file, header=None, engine="openpyxl")
+    raw = pd.read_excel(uploaded_file, header=None, dtype=str, engine="openpyxl")
     header_idx = find_header_row(raw, EXPECTED_HEADERS, search_rows=30)
     if header_idx is not None:
         header = raw.iloc[header_idx].astype(str).tolist()
@@ -137,7 +136,7 @@ def read_excel_with_detected_header(uploaded_file) -> pd.DataFrame:
     else:
         uploaded_file.seek(0)
         try:
-            df = pd.read_excel(uploaded_file, header=0, engine="openpyxl")
+            df = pd.read_excel(uploaded_file, header=0, dtype=str, engine="openpyxl")
         except Exception:
             df = raw.copy()
             df.columns = [f"col_{i}" for i in range(df.shape[1])]
@@ -195,17 +194,19 @@ def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = pd.NA
 
-    df[COL_SUSTANCIA] = df[COL_SUSTANCIA].fillna("").astype(str).str.strip()
-    # CORRECCIÓN: asegurar que FAMILIA no se convierta en booleano ni en otro tipo
-    df[COL_FAMILIA] = df[COL_FAMILIA].fillna("").astype(str).str.strip()
+    # Asegurar que todas las columnas sean strings para evitar conversiones a booleano
+    for col in EXPECTED_HEADERS:
+        df[col] = df[col].astype(str).fillna("").replace("nan", "")
+
+    # Familia: evitar booleanos y normalizar
+    df[COL_FAMILIA] = df[COL_FAMILIA].apply(lambda x: x.strip() if x and x.strip().upper() not in ("NAN", "NONE", "FALSE", "TRUE") else "")
     df[COL_FAMILIA] = df[COL_FAMILIA].replace("", "SIN FAMILIA").str.upper()
 
+    # Fecha: convertir seriales Excel y formatos comunes
     def fmt_fecha(v):
-        if pd.isna(v):
+        if not v or str(v).strip().upper() in ("N/A", "SIN DATO", ""):
             return ""
         s = str(v).strip()
-        if s.upper() in ("N/A", "SIN DATO", ""):
-            return ""
         if re.match(r"^\d+(\.0+)?$", s):
             try:
                 num = int(float(s))
@@ -224,8 +225,8 @@ def ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     df[COL_FECHA] = df[COL_FECHA].apply(fmt_fecha)
     df[COL_VIGENCIA] = df[COL_VIGENCIA].apply(normalize_vigencia)
-    df[COL_URL] = df[COL_URL].fillna("").astype(str).str.strip()
-    df[COL_PICTO] = df[COL_PICTO].fillna("").astype(str).str.strip()
+    df[COL_URL] = df[COL_URL].apply(lambda x: x.strip() if x and x.strip().lower() != "nan" else "")
+    df[COL_PICTO] = df[COL_PICTO].apply(lambda x: x.strip() if x and x.strip().lower() != "nan" else "")
     return df
 
 # ─────────────────────────────────────────────
@@ -237,22 +238,18 @@ def normalize_drive_url(url: str) -> str:
     u = url.strip()
     if u == "":
         return ""
-    # drive file link: /d/FILE_ID/
     m = re.search(r"/d/([a-zA-Z0-9_-]+)", u)
     if m:
         file_id = m.group(1)
         return f"https://drive.google.com/uc?export=view&id={file_id}"
-    # open?id=FILE_ID
     m2 = re.search(r"open\?id=([a-zA-Z0-9_-]+)", u)
     if m2:
         file_id = m2.group(1)
         return f"https://drive.google.com/uc?export=view&id={file_id}"
-    # share link with id= in query
     m3 = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", u)
     if m3:
         file_id = m3.group(1)
         return f"https://drive.google.com/uc?export=view&id={file_id}"
-    # otherwise return original
     return u
 
 # ─────────────────────────────────────────────
@@ -260,7 +257,6 @@ def normalize_drive_url(url: str) -> str:
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=600, show_spinner="Cargando fichas de seguridad…")
 def cargar_datos(sheet_input: Optional[str] = None, uploaded_file=None) -> pd.DataFrame:
-    # 1) archivo subido
     if uploaded_file is not None:
         filename = getattr(uploaded_file, "name", "").lower()
         if filename.endswith((".xls", ".xlsx")):
@@ -275,7 +271,6 @@ def cargar_datos(sheet_input: Optional[str] = None, uploaded_file=None) -> pd.Da
                 text = uploaded_file.getvalue().decode("latin-1")
             return read_with_detected_header_from_csv_text(text)
 
-    # 2) Google Sheet
     if sheet_input:
         sheet_id, gid = parse_sheet_url(sheet_input)
         if not sheet_id:
@@ -336,11 +331,21 @@ for col in EXPECTED_HEADERS:
     if col not in df.columns:
         df[col] = pd.NA
 
-# Normalizar URLs de pictogramas (soporta enlaces de Drive)
+# Normalizar pictograma URLs (soporta enlaces de Drive)
 df[COL_PICTO] = df[COL_PICTO].fillna("").astype(str).apply(normalize_drive_url)
-
-# Asegurar columnas y normalizaciones finales (vigencia, familia, fecha)
 df = ensure_expected_columns(df)
+
+# ─────────────────────────────────────────────
+# DEBUG OPCIONAL: mostrar primeras filas y URLs de pictogramas
+# ─────────────────────────────────────────────
+debug = st.sidebar.checkbox("Mostrar diagnóstico (URLs pictograma y primeras filas)", value=False)
+if debug:
+    st.sidebar.markdown("**Primeras filas (normalizadas)**")
+    st.sidebar.dataframe(df[[COL_SUSTANCIA, COL_FAMILIA, COL_FECHA, COL_VIGENCIA, COL_PICTO]].head(20))
+    st.sidebar.markdown("**Ejemplo de URLs de pictograma**")
+    sample_urls = df[COL_PICTO].dropna().unique().tolist()[:10]
+    for u in sample_urls:
+        st.sidebar.text(u)
 
 # ─────────────────────────────────────────────
 # SIDEBAR: filtros y métricas
@@ -403,18 +408,24 @@ for _, row in df_filtrado.iterrows():
 
         st.write("")
 
-        # Mostrar pictograma (soporta enlaces directos y enlaces de Drive transformados)
+        # Mostrar pictograma: primero intentar con st.image(url), si falla, descargar bytes y mostrar
         if url_picto and url_picto.lower().startswith("http"):
+            shown = False
             try:
                 st.image(url_picto, caption="Pictograma SGA", width=120)
+                shown = True
             except Exception:
-                # fallback: intentar descargar y mostrar desde bytes
+                shown = False
+            if not shown:
                 try:
                     resp = requests.get(url_picto, timeout=8)
                     resp.raise_for_status()
                     st.image(resp.content, caption="Pictograma SGA", width=120)
+                    shown = True
                 except Exception:
-                    st.write("⚗️ Pictograma no disponible")
+                    shown = False
+            if not shown:
+                st.write("⚗️ Pictograma no disponible")
         else:
             st.markdown(
                 "<div style='width:90px;height:90px;border:3px solid #e53935;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:2.2em;background:#fff3e0;'>⚗️</div>",
